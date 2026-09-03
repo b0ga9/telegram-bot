@@ -32,6 +32,5 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           TELEGRAM_CHANNEL_ID: ${{ secrets.TELEGRAM_CHANNEL_ID }}
-          OPENAI_MODEL: ${{ vars.OPENAI_MODEL }}
           POST_TOPIC: ${{ vars.POST_TOPIC }}
         run: python bot.py
