@@ -47,7 +47,10 @@ def check_config() -> None:
         "ADMIN_USER_ID": ADMIN_USER_ID,
     }
 
-    missing = [key for key, value in required.items() if not value]
+    missing = [
+        key for key, value in required.items()
+        if not value
+    ]
 
     if missing:
         raise RuntimeError(
@@ -112,27 +115,26 @@ async def get_market_data() -> dict[str, Any]:
 
     sorted_gainers = sorted(
         markets,
-        key=lambda x: x.get("price_change_percentage_24h") or 0,
+        key=lambda x: x.get(
+            "price_change_percentage_24h"
+        ) or 0,
         reverse=True,
     )
 
     sorted_losers = sorted(
         markets,
-        key=lambda x: x.get("price_change_percentage_24h") or 0,
+        key=lambda x: x.get(
+            "price_change_percentage_24h"
+        ) or 0,
     )
-
-    btc = coins.get("BTC", {})
-    eth = coins.get("ETH", {})
 
     return {
         "total_market_cap": data.get(
-            "total_market_cap",
-            {}
+            "total_market_cap", {}
         ).get("usd"),
 
         "total_volume": data.get(
-            "total_volume",
-            {}
+            "total_volume", {}
         ).get("usd"),
 
         "market_cap_change_24h": data.get(
@@ -140,16 +142,15 @@ async def get_market_data() -> dict[str, Any]:
         ),
 
         "btc_dominance": data.get(
-            "market_cap_percentage",
-            {}
+            "market_cap_percentage", {}
         ).get("btc"),
 
         "active_cryptocurrencies": data.get(
             "active_cryptocurrencies"
         ),
 
-        "btc": btc,
-        "eth": eth,
+        "btc": coins.get("BTC", {}),
+        "eth": coins.get("ETH", {}),
 
         "gainers": sorted_gainers[:5],
         "losers": sorted_losers[:5],
@@ -243,6 +244,7 @@ def format_market_data(
 async def openai_response(
     prompt: str,
     web_search: bool = False,
+    max_output_tokens: int = 900,
 ) -> str:
 
     headers = {
@@ -256,7 +258,7 @@ async def openai_response(
         "reasoning": {
             "effort": "low",
         },
-        "max_output_tokens": 1800,
+        "max_output_tokens": max_output_tokens,
     }
 
     if web_search:
@@ -275,15 +277,35 @@ async def openai_response(
             timeout=120,
         )
 
-        # ----------------------------------------------------
-        # Detailed OpenAI error
-        # ----------------------------------------------------
+        if response.status_code == 429:
+
+            try:
+                error_data = response.json()
+            except Exception:
+                error_data = response.text
+
+            message = (
+                error_data
+                .get("error", {})
+                .get("message", "")
+                if isinstance(error_data, dict)
+                else str(error_data)
+            )
+
+            logger.error(
+                "OpenAI rate limit: %s",
+                message,
+            )
+
+            raise RuntimeError(
+                "OpenAI временно ограничил запросы.\n\n"
+                f"{message}"
+            )
 
         if response.status_code >= 400:
 
             try:
                 error_data = response.json()
-
             except Exception:
                 error_data = response.text
 
@@ -334,52 +356,40 @@ async def openai_response(
 async def get_news_analysis() -> str:
 
     prompt = """
-Ты — аналитический модуль TRD Pulse.
+Ты — TRD Pulse News.
 
-Найди через Web Search самые важные финансовые и
-макроэкономические события за последние 24 часа.
+Через Web Search найди 3–5 самых важных финансовых
+и макроэкономических событий за последние 24 часа.
 
-ПРИОРИТЕТ:
+Приоритет:
+ФРС/ECB, инфляция, рынок труда, ставки,
+облигации, USD, S&P 500/Nasdaq,
+золото, нефть, крипто, геополитика.
 
-1. ФРС / ECB / другие центральные банки
-2. CPI / PCE / инфляция
-3. NFP / рынок труда / Jobless Claims
-4. ставки и доходности облигаций
-5. доллар США
-6. S&P 500 / Nasdaq
-7. золото / нефть
-8. криптовалюты
-9. геополитика и санкции
+Правила:
+- только реальные подтвержденные события;
+- не придумывай данные;
+- отделяй факт от интерпретации;
+- используй надежные источники;
+- не давай торговых рекомендаций;
+- ответ максимум ~700 слов.
 
-ПРАВИЛА:
-
-- Не придумывай события.
-- Отделяй ФАКТ от ИНТЕРПРЕТАЦИИ.
-- Используй надежные источники.
-- Если информация не подтверждена — укажи это.
-- Не давай торговых рекомендаций.
-- Не используй HTML.
-- Не показывай длинные URL обычным текстом.
-
-ФОРМАТИРОВАНИЕ:
-
-Используй Markdown:
+Markdown:
 
 **жирный**
 *курсив*
 ***жирный курсив***
-`цены / тикеры / проценты`
+`цены/тикеры/проценты`
 
-Для цитат:
+Цитаты:
+> текст
 
-> текст цитаты
-
-Ссылки обязательно делай гиперссылками:
-
+Источники только гиперссылками:
 [Reuters](https://...)
-[Associated Press](https://...)
+[AP](https://...)
 [Federal Reserve](https://...)
-[ECB](https://...)
+
+Не показывай длинные URL обычным текстом.
 
 ФОРМАТ:
 
@@ -387,31 +397,29 @@ async def get_news_analysis() -> str:
 
 ━━━━━━━━━━━━
 
-**1. Заголовок события**
+**1. Заголовок**
 
 **Факт:** ...
 
-*Почему это важно:* ...
-
-> Ключевая цитата, если есть.
+*Почему важно:* ...
 
 Источник: [Reuters](https://...)
 
 ━━━━━━━━━━━━
 
-**2. Следующее событие**
+**2. Заголовок**
 
 ...
 
-В конце:
+━━━━━━━━━━━━
 
-***ИТОГ:*** кратко опиши главный фактор,
-который сейчас влияет на рынки.
+***ИТОГ:*** главный фактор для рынков сейчас.
 """
 
     return await openai_response(
         prompt,
         web_search=True,
+        max_output_tokens=900,
     )
 
 
@@ -430,48 +438,35 @@ async def generate_pulse() -> str:
     news = await get_news_analysis()
 
     prompt = f"""
-Ты — главный аналитический модуль TRD Pulse.
+Ты — TRD Pulse.
 
-Объедини данные рынка и актуальные новости.
+Используй ТОЛЬКО предоставленные данные рынка
+и новости ниже.
 
-ДАННЫЕ РЫНКА:
-
+РЫНОК:
 {market_text}
 
-АКТУАЛЬНЫЕ НОВОСТИ:
-
+НОВОСТИ:
 {news}
 
-Создай финальный TRD Pulse.
+Создай короткий аналитический Pulse.
 
-ВАЖНО:
+Не придумывай факты.
+Не добавляй новые события.
+Не давай торговых рекомендаций.
 
-- Не придумывай данные.
-- Не добавляй события, которых нет в данных.
-- Разделяй факты и интерпретации.
-- Не давай торговых рекомендаций.
-- Не говори "покупать", "продавать",
-  "лонг", "шорт".
-- Не используй HTML.
-
-ФОРМАТИРОВАНИЕ:
+Используй Markdown:
 
 **жирный**
 *курсив*
 ***жирный курсив***
-`цены / тикеры / проценты`
-
-Цитаты:
-
-> текст
+`цены/тикеры/проценты`
 
 Источники:
-
 [Reuters](https://...)
 [Federal Reserve](https://...)
-[ECB](https://...)
 
-Никаких длинных URL в тексте.
+Никаких длинных URL.
 
 ФОРМАТ:
 
@@ -481,80 +476,73 @@ async def generate_pulse() -> str:
 
 📊 **РЫНОК**
 
-Ключевые показатели.
+Ключевые изменения.
 
 ━━━━━━━━━━━━
 
 ₿ **BTC**
 
-Цена и изменения.
+Цена + динамика.
 
 ━━━━━━━━━━━━
 
 Ξ **ETH**
 
-Цена и изменения.
+Цена + динамика.
 
 ━━━━━━━━━━━━
 
 🔥 **ЛИДЕРЫ**
 
-Топ движений.
+Топ движения.
 
 ━━━━━━━━━━━━
 
 🔻 **СЛАБЫЕ**
 
-Топ отрицательных движений.
-
-━━━━━━━━━━━━
-
-📈 **BTC DOMINANCE**
-
-Значение и краткий контекст.
+Топ падения.
 
 ━━━━━━━━━━━━
 
 🌍 **МИР**
 
-Главные мировые события.
+Только самые важные события из NEWS.
 
 ━━━━━━━━━━━━
 
 🏦 **МАКРО**
 
-Главные макроэкономические факторы.
+Главные макрофакторы.
 
 ━━━━━━━━━━━━
 
 🧠 **ЧТО ПРОИСХОДИТ**
 
-Краткий анализ.
+Краткая интерпретация.
 
 ━━━━━━━━━━━━
 
 ⚠️ **РИСК**
 
-Главные факторы риска.
+Главные риски.
 
 ━━━━━━━━━━━━
 
 ***TRD SIGNAL***
 
-Выбери:
-
 🟢 **RISK-ON**
+или
 🟡 **NEUTRAL**
+или
 🔴 **RISK-OFF**
 
-И объясни выбор одной короткой фразой.
-
-Источники размещай в конце соответствующих блоков.
+Одна короткая причина.
 """
 
     return await openai_response(
         prompt,
         web_search=False,
+        max_output_tokens=850,
     )
 
 
@@ -584,16 +572,11 @@ def markdown_to_telegram_html(
 
         return placeholder
 
-    # Protect inline code
     text = re.sub(
         r"`([^`\n]+)`",
         protect_code,
         text,
     )
-
-    # --------------------------------------------------------
-    # Protect Markdown links
-    # --------------------------------------------------------
 
     links: list[str] = []
 
@@ -634,15 +617,7 @@ def markdown_to_telegram_html(
         text,
     )
 
-    # --------------------------------------------------------
-    # Escape HTML
-    # --------------------------------------------------------
-
     text = html.escape(text)
-
-    # --------------------------------------------------------
-    # Bold italic
-    # --------------------------------------------------------
 
     text = re.sub(
         r"\*\*\*(.+?)\*\*\*",
@@ -651,10 +626,6 @@ def markdown_to_telegram_html(
         flags=re.DOTALL,
     )
 
-    # --------------------------------------------------------
-    # Bold
-    # --------------------------------------------------------
-
     text = re.sub(
         r"\*\*(.+?)\*\*",
         r"<b>\1</b>",
@@ -662,19 +633,11 @@ def markdown_to_telegram_html(
         flags=re.DOTALL,
     )
 
-    # --------------------------------------------------------
-    # Italic
-    # --------------------------------------------------------
-
     text = re.sub(
         r"(?<!\*)\*([^*\n]+)\*(?!\*)",
         r"<i>\1</i>",
         text,
     )
-
-    # --------------------------------------------------------
-    # Quotes
-    # --------------------------------------------------------
 
     lines = text.splitlines()
 
@@ -696,20 +659,12 @@ def markdown_to_telegram_html(
         result_lines
     )
 
-    # --------------------------------------------------------
-    # Restore links
-    # --------------------------------------------------------
-
     for index, value in enumerate(links):
 
         text = text.replace(
             f"___TRD_LINK_{index}___",
             value,
         )
-
-    # --------------------------------------------------------
-    # Restore code
-    # --------------------------------------------------------
 
     for index, value in enumerate(code_blocks):
 
@@ -877,7 +832,7 @@ async def news(
         )
 
         await update.message.reply_text(
-            f"Ошибка поиска новостей: {exc}"
+            f"Ошибка поиска новостей:\n{exc}"
         )
 
 
@@ -905,7 +860,7 @@ async def pulse(
         )
 
         await update.message.reply_text(
-            f"Ошибка генерации Pulse: {exc}"
+            f"Ошибка генерации Pulse:\n{exc}"
         )
 
 
@@ -942,7 +897,7 @@ async def publish(
         )
 
         await update.message.reply_text(
-            f"Ошибка публикации: {exc}"
+            f"Ошибка публикации:\n{exc}"
         )
 
 
@@ -961,38 +916,23 @@ def main() -> None:
     )
 
     application.add_handler(
-        CommandHandler(
-            "start",
-            start,
-        )
+        CommandHandler("start", start)
     )
 
     application.add_handler(
-        CommandHandler(
-            "market",
-            market,
-        )
+        CommandHandler("market", market)
     )
 
     application.add_handler(
-        CommandHandler(
-            "news",
-            news,
-        )
+        CommandHandler("news", news)
     )
 
     application.add_handler(
-        CommandHandler(
-            "pulse",
-            pulse,
-        )
+        CommandHandler("pulse", pulse)
     )
 
     application.add_handler(
-        CommandHandler(
-            "publish",
-            publish,
-        )
+        CommandHandler("publish", publish)
     )
 
     logger.info(
