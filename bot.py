@@ -5,10 +5,18 @@ import logging
 import os
 import re
 from datetime import datetime, timezone
+from pathlib import Path
 
 import httpx
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ParseMode
+from visual_engine import (
+    build_market_card,
+    build_price_card,
+    build_pulse_card,
+    generate_news_image,
+)
+
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -32,6 +40,11 @@ ADMIN_USER_ID = os.getenv("ADMIN_USER_ID")
 
 COINGECKO_API = "https://api.coingecko.com/api/v3"
 OPENAI_API = "https://api.openai.com/v1/responses"
+
+# TRD Visual Engine
+VISUAL_ENABLED = os.getenv("TRD_VISUAL_ENABLED", "true").lower() not in {"0", "false", "no"}
+VISUAL_DIR = Path(os.getenv("TRD_VISUAL_DIR", "/tmp/trd_visuals"))
+IMAGE_MODEL = os.getenv("OPENAI_IMAGE_MODEL", "gpt-image-2")
 
 # Automatic monitoring
 PRICE_CHECK_INTERVAL = 15 * 60       # 15 minutes
@@ -326,10 +339,23 @@ async def prices_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         coins = await get_monitored_prices()
-        await update.message.reply_text(
-            format_prices(coins),
-            parse_mode=ParseMode.HTML,
+        image_path = make_price_visual(coins)
+        caption = (
+            "💰 <b>TRD PRICES</b>\n\n"
+            "> ⚡ <b>Главное:</b> быстрый snapshot отслеживаемого рынка.\n\n"
+            "🕒 Обновлено сейчас"
         )
+        if image_path:
+            await update.message.reply_photo(
+                photo=image_path,
+                caption=caption,
+                parse_mode=ParseMode.HTML,
+            )
+        else:
+            await update.message.reply_text(
+                format_prices(coins),
+                parse_mode=ParseMode.HTML,
+            )
     except Exception as e:
         logger.exception("Prices error")
         await update.message.reply_text(
@@ -594,6 +620,102 @@ async def send_long_message(
             )
 
 
+
+# ============================================================
+# TRD VISUAL ENGINE INTEGRATION
+# ============================================================
+
+async def make_news_visual(post, key="news"):
+    """Generate an editorial image for a NEWS post."""
+    if not VISUAL_ENABLED:
+        return None
+    try:
+        VISUAL_DIR.mkdir(parents=True, exist_ok=True)
+        return await generate_news_image(
+            api_key=OPENAI_API_KEY,
+            api_url=OPENAI_API,
+            model=IMAGE_MODEL,
+            post_text=post,
+            event_key=key,
+            output_dir=VISUAL_DIR,
+        )
+    except Exception:
+        logger.exception("NEWS visual generation failed")
+        return None
+
+
+def make_market_visual(market, signal=None):
+    """Render a deterministic MARKET data card."""
+    if not VISUAL_ENABLED:
+        return None
+    try:
+        VISUAL_DIR.mkdir(parents=True, exist_ok=True)
+        return build_market_card(
+            market,
+            signal=signal,
+            output_dir=VISUAL_DIR,
+        )
+    except Exception:
+        logger.exception("MARKET visual generation failed")
+        return None
+
+
+def make_price_visual(coins):
+    """Render a deterministic PRICES card."""
+    if not VISUAL_ENABLED:
+        return None
+    try:
+        VISUAL_DIR.mkdir(parents=True, exist_ok=True)
+        return build_price_card(coins, output_dir=VISUAL_DIR)
+    except Exception:
+        logger.exception("PRICES visual generation failed")
+        return None
+
+
+def make_pulse_visual(market, signal=None):
+    """Render a deterministic dynamic PULSE card."""
+    if not VISUAL_ENABLED:
+        return None
+    try:
+        VISUAL_DIR.mkdir(parents=True, exist_ok=True)
+        return build_pulse_card(
+            market,
+            signal=signal,
+            output_dir=VISUAL_DIR,
+        )
+    except Exception:
+        logger.exception("PULSE visual generation failed")
+        return None
+
+
+async def send_visual_post(bot, chat_id, image_path, text):
+    """Send image + TRD caption; fall back to text if visual creation failed."""
+    if image_path:
+        caption = markdown_to_telegram_html(text)
+        # Telegram photo captions are shorter than normal messages.
+        if len(caption) <= 1024:
+            await bot.send_photo(
+                chat_id=chat_id,
+                photo=image_path,
+                caption=caption,
+                parse_mode=ParseMode.HTML,
+            )
+            return
+
+        await bot.send_photo(
+            chat_id=chat_id,
+            photo=image_path,
+        )
+        await send_long_message(
+            bot,
+            chat_id,
+            text,
+        )
+        return
+
+    await send_long_message(bot, chat_id, text)
+
+
 # ============================================================
 # NEWS
 # ============================================================
@@ -723,9 +845,12 @@ async def news_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
 
-        await send_long_message(
+        context.user_data["news_text"] = post
+        image_path = await make_news_visual(post, key=key)
+        await send_visual_post(
             context.bot,
             update.effective_chat.id,
+            image_path,
             post,
         )
 
@@ -837,9 +962,11 @@ async def pulse_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         context.user_data["pulse_text"] = pulse
 
-        await send_long_message(
+        image_path = make_pulse_visual(market=await get_market_data())
+        await send_visual_post(
             context.bot,
             update.effective_chat.id,
+            image_path,
             pulse,
         )
 
@@ -1604,12 +1731,21 @@ async def automatic_price_check(application):
             signal
         )
 
-        await application.bot.send_message(
-            chat_id=TELEGRAM_CHANNEL_ID,
-            text=alert,
-            parse_mode=ParseMode.HTML,
-            disable_web_page_preview=True,
-        )
+        image_path = make_market_visual(market, signal=signal)
+        if image_path:
+            await application.bot.send_photo(
+                chat_id=TELEGRAM_CHANNEL_ID,
+                photo=image_path,
+                caption=alert[:1024],
+                parse_mode=ParseMode.HTML,
+            )
+        else:
+            await application.bot.send_message(
+                chat_id=TELEGRAM_CHANNEL_ID,
+                text=alert,
+                parse_mode=ParseMode.HTML,
+                disable_web_page_preview=True,
+            )
 
         state[
             "last_market_alert_at"
@@ -1695,9 +1831,11 @@ async def automatic_pulse(
             retries=0,
         )
 
-        await send_long_message(
+        image_path = make_pulse_visual(market, signal=signal)
+        await send_visual_post(
             application.bot,
             TELEGRAM_CHANNEL_ID,
+            image_path,
             result,
         )
 
@@ -1769,9 +1907,11 @@ async def automatic_news_check(application):
             )
             return
 
-        await send_long_message(
+        image_path = await make_news_visual(post, key=key)
+        await send_visual_post(
             application.bot,
             TELEGRAM_CHANNEL_ID,
+            image_path,
             post,
         )
 
@@ -2212,11 +2352,29 @@ async def market_command(
     try:
         data = await get_market_data()
 
-        await update.message.reply_text(
-            format_market_data(data),
-            parse_mode=ParseMode.HTML,
-            disable_web_page_preview=True,
+        image_path = make_market_visual(data)
+        market_text = (
+            "🌐 <b>TRD MARKET</b>\n\n"
+            "> ⚡ <b>Главное:</b> состояние рынка в одном экране.\n\n"
+            f"Market Cap: <b>{format_money(data['market_cap'])}</b>\n"
+            f"24h: <b>{format_pct(data['market_cap_change_24h'])}</b>\n"
+            f"₿ BTC: <b>{format_price((data['btc'] or {}).get('current_price'))}</b> "
+            f"{format_pct(price_change_24h(data['btc'] or {}))}\n"
+            f"Ξ ETH: <b>{format_price((data['eth'] or {}).get('current_price'))}</b> "
+            f"{format_pct(price_change_24h(data['eth'] or {}))}"
         )
+        if image_path:
+            await update.message.reply_photo(
+                photo=image_path,
+                caption=markdown_to_telegram_html(market_text),
+                parse_mode=ParseMode.HTML,
+            )
+        else:
+            await update.message.reply_text(
+                format_market_data(data),
+                parse_mode=ParseMode.HTML,
+                disable_web_page_preview=True,
+            )
 
     except Exception as e:
         logger.exception(
