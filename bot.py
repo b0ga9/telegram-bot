@@ -579,7 +579,7 @@ async def send_long_message(
     text,
     disable_web_page_preview=True,
 ):
-    html_text = markdown_to_telegram_html(text)
+    html_text = text if "<blockquote>" in text or "<b>" in text else markdown_to_telegram_html(text)
 
     max_length = 3900
 
@@ -869,6 +869,39 @@ async def news_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
 
 
+
+def normalize_pulse_html(text: str) -> str:
+    """Clean Pulse while preserving Telegram HTML tags."""
+    text = text.replace("\r\n", "\n").replace("\r", "\n").strip()
+    text = re.sub(r"\n{3,}", "\n\n", text)
+
+    # Remove unwanted legacy labels if the model still emits them.
+    text = re.sub(r"⚡\s*<b>Главное:</b>\s*", "", text, flags=re.I)
+    text = re.sub(r"⚡\s*\*\*Главное:\*\*\s*", "", text, flags=re.I)
+    text = re.sub(r"(?m)^\s*\*\*(?:Главное|Что важно)\*\*\s*$\n?", "", text, flags=re.I)
+
+    # Only one blockquote: merge multiple accidental quote blocks.
+    quotes = re.findall(r"<blockquote>(.*?)</blockquote>", text, flags=re.S | re.I)
+    if len(quotes) > 1:
+        merged = " ".join(re.sub(r"\s+", " ", q).strip() for q in quotes)
+        text = re.sub(r"<blockquote>.*?</blockquote>", "", text, flags=re.S | re.I)
+        # Insert quote after title.
+        lines = text.split("\n")
+        pos = 0
+        for i, line in enumerate(lines):
+            if "TRD PULSE" in line.upper():
+                pos = i + 1
+                break
+        lines.insert(pos, "\n<blockquote>" + merged + "</blockquote>")
+        text = "\n".join(lines)
+
+    # Ensure a blank line after title and before quote.
+    text = re.sub(r"(🟢|🔴|🟡)\s*<b>TRD PULSE</b>\s*", r"\1 <b>TRD PULSE</b>\n\n", text, flags=re.I)
+    text = re.sub(r"</blockquote>\s*", "</blockquote>\n\n", text, flags=re.I)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
+
+
 # ============================================================
 # PULSE
 # ============================================================
@@ -878,56 +911,45 @@ def build_pulse_prompt(market, recent_news=""):
     eth = market["eth"] or {}
 
     return f"""
-Ты — аналитик Telegram-канала TRD Pulse.
+Ты — редактор TRD. Создай короткий профессиональный PULSE на русском языке.
 
-Сделай ОЧЕНЬ короткий рыночный Pulse.
+ДАННЫЕ:
+BTC: {format_price(btc.get("current_price"))}; 1ч {format_pct(price_change_1h(btc))}; 24ч {format_pct(price_change_24h(btc))}
+ETH: {format_price(eth.get("current_price"))}; 1ч {format_pct(price_change_1h(eth))}; 24ч {format_pct(price_change_24h(eth))}
+Капитализация: {format_money(market.get("market_cap"))}; 24ч {format_pct(market.get("market_cap_change_24h"))}
+BTC dominance: {format_pct(market.get("btc_dominance"))}
 
-Данные рынка:
-
-BTC:
-цена: {format_price(btc.get("current_price"))}
-1h: {format_pct(price_change_1h(btc))}
-24h: {format_pct(price_change_24h(btc))}
-
-ETH:
-цена: {format_price(eth.get("current_price"))}
-1h: {format_pct(price_change_1h(eth))}
-24h: {format_pct(price_change_24h(eth))}
-
-Market Cap:
-{format_money(market.get("market_cap"))}
-
-Изменение Market Cap:
-{format_pct(market.get("market_cap_change_24h"))}
-
-BTC dominance:
-{format_pct(market.get("btc_dominance"))}
-
-Последняя важная новость:
+КОНТЕКСТ:
 {recent_news[:3000]}
 
-Формат:
+СНАЧАЛА ОПРЕДЕЛИ НАСТРОЕНИЕ:
+- 🟢 если рынок в целом показывает положительный импульс / восстановление / позитивное важное событие;
+- 🔴 если рынок в целом снижается / давление усиливается / событие негативное;
+- 🟡 если картина смешанная или нейтральная.
+Не выбирай цвет только по одной монете.
 
-⚡ **TRD PULSE**
+ФОРМАТ — ОДНА ЕДИНСТВЕННАЯ ЦИТАТА:
+<цвет> <b>TRD PULSE</b>
 
-**Короткий заголовок**
+<b>Короткий заголовок</b>
 
-> ⚡ **Главное:** одна главная мысль движения рынка.
+<blockquote>2–3 коротких предложения, которые полностью объясняют, что сейчас происходит на рынке и почему. Это единственная цитата во всём посте.</blockquote>
 
-Коротко опиши ситуацию в 2–3 предложениях.
+<b>BTC</b>  цена · 1ч · 24ч
+<b>ETH</b>  цена · 1ч · 24ч
 
-**Главное**
-• BTC — цена и изменение
-• ETH — цена и изменение
-• один важный фактор
+<b>Мнение TRD:</b> 1–2 предложения собственного аналитического мнения.
 
-**Что важно**
-Одно короткое предложение о ближайшем факторе.
-
-Не давай торговых рекомендаций.
-Не используй длинные объяснения.
-Символ ">" — это визуальный блок, НЕ настоящая цитата.
-Объём: примерно 100–180 слов.
+Правила:
+- Используй только одну цитату <blockquote>...</blockquote>.
+- НЕ используй «⚡ Главное», «Что важно», «Главное».
+- Не добавляй вторую цитату.
+- Пустая строка между всеми блоками.
+- Не перегружай эмодзи: разрешён только один цветовой круг перед TRD PULSE.
+- Цветовой круг должен соответствовать общему настроению.
+- «Мнение TRD» обязательно.
+- Не давай торговых рекомендаций.
+- 90–150 слов.
 """
 
 
@@ -957,6 +979,7 @@ async def pulse_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         news = get_state(context.application).get("last_news_text", "")
 
         pulse = await generate_pulse_from_market(market, news)
+        pulse = normalize_pulse_html(pulse)
 
         context.user_data["pulse_text"] = pulse
 
@@ -1830,6 +1853,7 @@ async def automatic_pulse(
             max_output_tokens=600,
             retries=0,
         )
+        result = normalize_pulse_html(result)
 
         image_path = make_pulse_visual(market, signal=signal)
         await send_visual_post(
@@ -2135,41 +2159,6 @@ async def send_publish_preview(message, context):
 async def show_publish_preview(query, context):
     await send_publish_preview(query.message, context)
 
-
-
-async def publish_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Открывает редактор для последнего сгенерированного поста.
-
-    Если /news или /pulse уже создали текст и визуал, повторно выбирать
-    «с картинкой/без картинки» не нужно: визуал подхватывается автоматически.
-    """
-    if not await admin_only(update):
-        return
-
-    text = (
-        context.user_data.get("publish_text")
-        or context.user_data.get("pulse_text")
-        or context.user_data.get("news_text")
-        or ""
-    ).strip()
-
-    photo_path = context.user_data.get("publish_photo_path")
-
-    if not text:
-        await update.message.reply_text(
-            "📝 Пока нет готового поста. Сначала используй /news или /pulse."
-        )
-        return
-
-    context.user_data["publish_text"] = text
-    context.user_data["publish_waiting"] = None
-
-    if photo_path and Path(photo_path).exists():
-        context.user_data["publish_photo"] = None
-    else:
-        context.user_data["publish_photo_path"] = None
-
-    await send_publish_preview(update.message, context)
 
 
 async def photo_handler(
