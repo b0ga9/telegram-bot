@@ -1,11 +1,9 @@
-import html
 import logging
 import os
 from typing import Any
 
 import httpx
 from telegram import Update
-from telegram.constants import ParseMode
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -42,7 +40,7 @@ logger = logging.getLogger("trd-pulse")
 
 
 # ============================================================
-# VALIDATION
+# CONFIG CHECK
 # ============================================================
 
 def check_config() -> None:
@@ -57,6 +55,9 @@ def check_config() -> None:
     if not OPENAI_API_KEY:
         missing.append("OPENAI_API_KEY")
 
+    if not os.getenv("ADMIN_USER_ID"):
+        missing.append("ADMIN_USER_ID")
+
     if missing:
         raise RuntimeError(
             "Не заданы переменные окружения: "
@@ -65,7 +66,7 @@ def check_config() -> None:
 
 
 # ============================================================
-# HTTP
+# HTTP JSON
 # ============================================================
 
 async def get_json(
@@ -73,8 +74,14 @@ async def get_json(
     url: str,
     params: dict[str, Any] | None = None,
 ) -> dict[str, Any] | list[Any]:
-    response = await client.get(url, params=params)
+
+    response = await client.get(
+        url,
+        params=params,
+    )
+
     response.raise_for_status()
+
     return response.json()
 
 
@@ -83,21 +90,11 @@ async def get_json(
 # ============================================================
 
 async def get_market_data() -> dict[str, Any]:
-    """
-    Получает базовую картину крипторынка:
-
-    - BTC
-    - ETH
-    - top gainers
-    - top losers
-    - market cap
-    - volume
-    """
 
     async with httpx.AsyncClient(
         timeout=HTTP_TIMEOUT,
         headers={
-            "User-Agent": "TRD-Pulse/1.0",
+            "User-Agent": "TRD-Pulse/2.0",
             "Accept": "application/json",
         },
     ) as client:
@@ -121,119 +118,237 @@ async def get_market_data() -> dict[str, Any]:
         )
 
     if not isinstance(global_data, dict):
-        raise RuntimeError("Некорректный ответ CoinGecko global")
+        raise RuntimeError(
+            "Некорректный ответ CoinGecko global"
+        )
 
     if not isinstance(coins, list):
-        raise RuntimeError("Некорректный ответ CoinGecko markets")
+        raise RuntimeError(
+            "Некорректный ответ CoinGecko markets"
+        )
 
     market = global_data.get("data", {})
 
     cleaned = []
 
     for coin in coins:
+
         cleaned.append(
             {
-                "symbol": str(coin.get("symbol", "")).upper(),
+                "id": coin.get("id"),
+                "symbol": str(
+                    coin.get("symbol", "")
+                ).upper(),
                 "name": coin.get("name"),
-                "price_usd": coin.get("current_price"),
-                "market_cap": coin.get("market_cap"),
-                "volume_24h": coin.get("total_volume"),
-                "change_1h": coin.get("price_change_percentage_1h_in_currency"),
-                "change_24h": coin.get("price_change_percentage_24h_in_currency"),
-                "change_7d": coin.get("price_change_percentage_7d_in_currency"),
+
+                "price_usd": coin.get(
+                    "current_price"
+                ),
+
+                "market_cap": coin.get(
+                    "market_cap"
+                ),
+
+                "volume_24h": coin.get(
+                    "total_volume"
+                ),
+
+                "change_1h": coin.get(
+                    "price_change_percentage_1h_in_currency"
+                ),
+
+                "change_24h": coin.get(
+                    "price_change_percentage_24h_in_currency"
+                ),
+
+                "change_7d": coin.get(
+                    "price_change_percentage_7d_in_currency"
+                ),
             }
         )
 
     gainers = sorted(
         cleaned,
-        key=lambda x: x.get("change_24h") or -999,
+        key=lambda x: x.get("change_24h")
+        if x.get("change_24h") is not None
+        else -999,
         reverse=True,
     )[:10]
 
     losers = sorted(
         cleaned,
-        key=lambda x: x.get("change_24h") or 999,
+        key=lambda x: x.get("change_24h")
+        if x.get("change_24h") is not None
+        else 999,
     )[:10]
 
     btc = next(
-        (coin for coin in cleaned if coin["symbol"] == "BTC"),
+        (
+            coin
+            for coin in cleaned
+            if coin["symbol"] == "BTC"
+        ),
         None,
     )
 
     eth = next(
-        (coin for coin in cleaned if coin["symbol"] == "ETH"),
+        (
+            coin
+            for coin in cleaned
+            if coin["symbol"] == "ETH"
+        ),
         None,
     )
 
     return {
-        "market_cap_usd": market.get("total_market_cap", {}).get("usd"),
-        "volume_24h_usd": market.get("total_volume", {}).get("usd"),
-        "market_cap_change_24h": market.get("market_cap_change_percentage_24h_usd"),
+        "market_cap_usd": market.get(
+            "total_market_cap", {}
+        ).get("usd"),
+
+        "volume_24h_usd": market.get(
+            "total_volume", {}
+        ).get("usd"),
+
+        "market_cap_change_24h": market.get(
+            "market_cap_change_percentage_24h_usd"
+        ),
+
+        "btc_dominance": market.get(
+            "market_cap_percentage", {}
+        ).get("btc"),
+
+        "active_cryptocurrencies": market.get(
+            "active_cryptocurrencies"
+        ),
+
+        "markets": market.get(
+            "markets"
+        ),
+
         "btc": btc,
         "eth": eth,
+
         "top_gainers": gainers,
         "top_losers": losers,
     }
 
 
 # ============================================================
-# FORMAT MARKET DATA
+# FORMAT MARKET
 # ============================================================
 
-def format_market_data(data: dict[str, Any]) -> str:
+def format_market_data(
+    data: dict[str, Any],
+) -> str:
+
     lines = []
 
-    market_cap = data.get("market_cap_usd")
-    volume = data.get("volume_24h_usd")
-    market_change = data.get("market_cap_change_24h")
+    market_cap = data.get(
+        "market_cap_usd"
+    )
+
+    volume = data.get(
+        "volume_24h_usd"
+    )
+
+    market_change = data.get(
+        "market_cap_change_24h"
+    )
+
+    dominance = data.get(
+        "btc_dominance"
+    )
+
+    active = data.get(
+        "active_cryptocurrencies"
+    )
 
     if market_cap:
         lines.append(
-            f"Total crypto market cap: ${market_cap:,.0f}"
+            f"Total market cap: "
+            f"${market_cap:,.0f}"
         )
 
     if volume:
         lines.append(
-            f"24h volume: ${volume:,.0f}"
+            f"24h volume: "
+            f"${volume:,.0f}"
         )
 
     if market_change is not None:
         lines.append(
-            f"Market cap 24h change: {market_change:.2f}%"
+            f"Market cap 24h: "
+            f"{market_change:+.2f}%"
+        )
+
+    if dominance is not None:
+        lines.append(
+            f"BTC dominance: "
+            f"{dominance:.2f}%"
+        )
+
+    if active:
+        lines.append(
+            f"Active cryptocurrencies: "
+            f"{active:,}"
         )
 
     lines.append("")
 
     for label in ("btc", "eth"):
+
         coin = data.get(label)
 
         if not coin:
             continue
 
+        price = coin.get(
+            "price_usd"
+        )
+
+        if price is None:
+            continue
+
         lines.append(
             f"{coin['symbol']}: "
-            f"${coin['price_usd']:,.2f} | "
-            f"1h {coin.get('change_1h', 0) or 0:+.2f}% | "
-            f"24h {coin.get('change_24h', 0) or 0:+.2f}% | "
-            f"7d {coin.get('change_7d', 0) or 0:+.2f}%"
+            f"${price:,.2f} | "
+            f"1h {coin.get('change_1h') or 0:+.2f}% | "
+            f"24h {coin.get('change_24h') or 0:+.2f}% | "
+            f"7d {coin.get('change_7d') or 0:+.2f}%"
         )
 
     lines.append("")
     lines.append("TOP GAINERS")
 
-    for coin in data["top_gainers"][:10]:
-        change = coin.get("change_24h") or 0
+    for coin in data["top_gainers"][:5]:
+
+        change = coin.get(
+            "change_24h"
+        )
+
+        if change is None:
+            continue
+
         lines.append(
-            f"{coin['symbol']}: {change:+.2f}%"
+            f"{coin['symbol']}: "
+            f"{change:+.2f}%"
         )
 
     lines.append("")
     lines.append("TOP LOSERS")
 
-    for coin in data["top_losers"][:10]:
-        change = coin.get("change_24h") or 0
+    for coin in data["top_losers"][:5]:
+
+        change = coin.get(
+            "change_24h"
+        )
+
+        if change is None:
+            continue
+
         lines.append(
-            f"{coin['symbol']}: {change:+.2f}%"
+            f"{coin['symbol']}: "
+            f"{change:+.2f}%"
         )
 
     return "\n".join(lines)
@@ -248,30 +363,32 @@ async def openai_response(
     web_search: bool = False,
 ) -> str:
 
-    tools = []
-
-    if web_search:
-        tools.append(
-            {
-                "type": "web_search"
-            }
-        )
-
     payload = {
         "model": OPENAI_MODEL,
+
         "input": prompt,
+
         "reasoning": {
             "effort": "low"
         },
+
         "max_output_tokens": 1800,
     }
 
-    if tools:
-        payload["tools"] = tools
+    if web_search:
+
+        payload["tools"] = [
+            {
+                "type": "web_search"
+            }
+        ]
 
     headers = {
-        "Authorization": f"Bearer {OPENAI_API_KEY}",
-        "Content-Type": "application/json",
+        "Authorization":
+            f"Bearer {OPENAI_API_KEY}",
+
+        "Content-Type":
+            "application/json",
     }
 
     async with httpx.AsyncClient(
@@ -285,6 +402,7 @@ async def openai_response(
         )
 
         if response.status_code >= 400:
+
             logger.error(
                 "OpenAI error: %s",
                 response.text,
@@ -294,25 +412,42 @@ async def openai_response(
 
         data = response.json()
 
-    # Responses API normally exposes the final generated text here.
-    output_text = data.get("output_text")
+    output_text = data.get(
+        "output_text"
+    )
 
     if output_text:
         return output_text.strip()
 
-    # Fallback parser.
     result = []
 
-    for item in data.get("output", []):
-        for content in item.get("content", []):
-            if content.get("type") == "output_text":
-                text = content.get("text")
+    for item in data.get(
+        "output",
+        []
+    ):
+
+        for content in item.get(
+            "content",
+            []
+        ):
+
+            if content.get(
+                "type"
+            ) == "output_text":
+
+                text = content.get(
+                    "text"
+                )
 
                 if text:
-                    result.append(text)
+                    result.append(
+                        text
+                    )
 
     if result:
-        return "\n".join(result).strip()
+        return "\n".join(
+            result
+        ).strip()
 
     raise RuntimeError(
         "OpenAI не вернул текстовый результат."
@@ -320,74 +455,58 @@ async def openai_response(
 
 
 # ============================================================
-# NEWS + MACRO
+# NEWS
 # ============================================================
 
 async def get_news_analysis() -> str:
+
     prompt = """
-Ты работаешь как news researcher для проекта TRD Pulse.
+Ты — news research engine проекта TRD Pulse.
 
-Используй Web Search и найди наиболее важные события последних 24 часов,
-которые потенциально способны повлиять на финансовые рынки.
+Используй Web Search.
 
-Приоритет:
+Найди наиболее важные события последних 24 часов,
+которые способны повлиять на финансовые рынки.
 
-1. ФРС / ЕЦБ / центральные банки
-2. инфляция / CPI / PCE
-3. NFP / рынок труда / безработица
-4. ставки и доходности облигаций
-5. доллар США
-6. S&P 500 / Nasdaq
-7. золото / нефть
-8. крипторынок
-9. войны и геополитика
-10. санкции
-11. решения правительств
-12. крупные заявления официальных лиц
+ПРИОРИТЕТ:
 
-Не придумывай события.
+1. Федеральная резервная система США
+2. Европейский центральный банк
+3. другие центральные банки
+4. инфляция
+5. CPI / PCE
+6. NFP / занятость
+7. безработица
+8. процентные ставки
+9. доходности облигаций
+10. доллар США
+11. S&P 500
+12. Nasdaq
+13. золото
+14. нефть
+15. Bitcoin
+16. Ethereum
+17. крипторынок
+18. геополитика
+19. санкции
+20. важные заявления правительств
 
-Для каждого действительно важного события укажи:
+НЕ ПРИДУМЫВАЙ СОБЫТИЯ.
 
-- что произошло;
-- когда;
-- какой рынок это затрагивает;
-- почему событие может иметь значение;
-- является ли связь подтвержденной или только возможной.
+Для каждого действительно важного события:
 
-Не превращай возможную причинность в установленный факт.
+• Что произошло
+• Когда произошло
+• Какой рынок затрагивает
+• Почему это важно
+• Факт или интерпретация
 
-Верни краткий структурированный research report на русском языке.
-"""
+ОСОБО ВАЖНО:
 
-    return await openai_response(
-        prompt,
-        web_search=True,
-    )
+Если источник не подтверждает причинность,
+не говори, что событие вызвало движение рынка.
 
-
-# ============================================================
-# TRD PULSE
-# ============================================================
-
-async def generate_pulse(
-    market_data: dict[str, Any],
-    news: str,
-) -> str:
-
-    market_text = format_market_data(market_data)
-
-    prompt = f"""
-Ты — аналитический движок TRD Pulse.
-
-Твоя задача — объединить реальные рыночные данные и найденные новости.
-
-ВАЖНО:
-
-Нельзя выдавать предположение за установленную причину.
-
-Если событие произошло одновременно с движением рынка,
-используй формулировки:
+Используй:
 
 "возможный фактор"
 
@@ -397,61 +516,161 @@ async def generate_pulse(
 
 "прямая причинность не подтверждена"
 
-Если есть подтвержденная связь из надежного источника,
-можно сказать, что событие непосредственно связано с движением.
+Если причинность подтверждена источниками,
+это можно указать.
 
-=== MARKET DATA ===
+В конце каждого события укажи:
+
+Источник: название источника + ссылка.
+
+Пиши на русском.
+
+Будь кратким.
+
+Не добавляй несущественные новости.
+"""
+
+    return await openai_response(
+        prompt,
+        web_search=True,
+    )
+
+
+# ============================================================
+# PULSE
+# ============================================================
+
+async def generate_pulse(
+    market_data: dict[str, Any],
+    news: str,
+) -> str:
+
+    market_text = format_market_data(
+        market_data
+    )
+
+    prompt = f"""
+Ты — главный аналитический движок TRD Pulse.
+
+Твоя задача — объединить реальные рыночные данные
+с research report новостей.
+
+========================
+MARKET DATA
+========================
 
 {market_text}
 
-=== NEWS RESEARCH ===
+========================
+NEWS RESEARCH
+========================
 
 {news}
 
-=== ФОРМАТ ===
+========================
+ПРАВИЛА
+========================
+
+Не выдавай предположение за факт.
+
+Если событие произошло одновременно
+с движением рынка, но причинность не доказана:
+
+"возможный фактор"
+
+"рынок мог отреагировать"
+
+"совпадает по времени"
+
+"прямая причинность не подтверждена"
+
+Не пиши:
+
+"рынок вырос из-за X"
+
+если источник не подтверждает такую связь.
+
+Не давай торговых рекомендаций.
+
+Не используй:
+
+"покупать"
+
+"продавать"
+
+"лонг"
+
+"шорт"
+
+========================
+ФОРМАТ
+========================
 
 TRD PULSE ⚡
 
 📊 РЫНОК
-Кратко опиши состояние рынка.
+
+Краткая оценка общего состояния рынка.
 
 ₿ BTC
-Цена и главное движение.
+
+Цена + 24h + ключевой контекст.
 
 Ξ ETH
-Цена и главное движение.
+
+Цена + 24h + ключевой контекст.
 
 🔥 ЛИДЕРЫ
+
 2–4 наиболее заметных движения.
 
 🔻 СЛАБЫЕ
+
 2–4 наиболее заметных падения.
 
+📈 BTC DOMINANCE
+
+Что происходит с доминацией BTC.
+
 🌍 МИР
+
 Только действительно важные события.
 
 🏦 МАКРО
-ФРС / ставки / инфляция / доллар / облигации,
-если это сейчас действительно актуально.
+
+ФРС / ставки / инфляция / доллар /
+облигации — только если актуально.
 
 🧠 ЧТО ПРОИСХОДИТ
-Свяжи рыночное движение с новостями,
-но четко отделяй факты от интерпретаций.
+
+Главная аналитическая связка между рынком
+и событиями.
+
+Четко отделяй факт от интерпретации.
 
 ⚠️ РИСК
-Что сейчас может резко изменить картину.
 
-Не давай торговую рекомендацию и не пиши "покупать" или "продавать".
+Что способно резко изменить ситуацию.
 
-Стиль:
+========================
+СТИЛЬ
+========================
 
-коротко;
-плотно;
-профессионально;
-без воды;
-без кликбейта.
+Коротко.
 
-Ответ должен быть готов для публикации в Telegram.
+Плотно.
+
+Профессионально.
+
+Без воды.
+
+Без кликбейта.
+
+Не повторяй одну и ту же информацию.
+
+Пост должен быть готов для Telegram.
+
+Не добавляй служебные комментарии.
 """
 
     return await openai_response(
@@ -461,28 +680,30 @@ TRD PULSE ⚡
 
 
 # ============================================================
-# TELEGRAM HELPERS
+# ADMIN
 # ============================================================
 
-def is_admin(update: Update) -> bool:
-    """
-    Пока используем простой список Telegram user ID.
+def is_admin(
+    update: Update,
+) -> bool:
 
-    ADMIN_USER_ID задаётся через environment.
-    """
-
-    admin_id = os.getenv("ADMIN_USER_ID")
-
-    if not admin_id:
-        return False
+    admin_id = os.getenv(
+        "ADMIN_USER_ID"
+    )
 
     user = update.effective_user
 
-    if not user:
+    if not admin_id or not user:
         return False
 
-    return str(user.id) == str(admin_id)
+    return str(user.id) == str(
+        admin_id
+    )
 
+
+# ============================================================
+# TELEGRAM
+# ============================================================
 
 async def send_long_message(
     update: Update,
@@ -492,17 +713,23 @@ async def send_long_message(
     if not update.message:
         return
 
-    # Telegram имеет ограничение около 4096 символов.
     chunk_size = 3900
 
-    for i in range(0, len(text), chunk_size):
+    for i in range(
+        0,
+        len(text),
+        chunk_size,
+    ):
+
         await update.message.reply_text(
-            text[i:i + chunk_size]
+            text[
+                i:i + chunk_size
+            ]
         )
 
 
 # ============================================================
-# COMMANDS
+# START
 # ============================================================
 
 async def start(
@@ -513,18 +740,25 @@ async def start(
     text = """
 TRD Pulse ⚡
 
-Доступные команды:
+Команды:
 
 /market — состояние крипторынка
 /news — важные новости и макро
 /pulse — полный TRD Pulse
 /publish — создать и опубликовать Pulse
 
-Бот работает с реальными рыночными данными и Web Search.
+TRD Pulse использует реальные рыночные данные
+и Web Search.
 """
 
-    await update.message.reply_text(text)
+    await update.message.reply_text(
+        text
+    )
 
+
+# ============================================================
+# MARKET
+# ============================================================
 
 async def market(
     update: Update,
@@ -532,21 +766,33 @@ async def market(
 ) -> None:
 
     try:
+
         data = await get_market_data()
-        text = format_market_data(data)
+
+        text = format_market_data(
+            data
+        )
 
         await send_long_message(
             update,
-            "📊 TRD MARKET\n\n" + text,
+            "📊 TRD MARKET\n\n"
+            + text,
         )
 
     except Exception as exc:
-        logger.exception("Market error")
+
+        logger.exception(
+            "Market error"
+        )
 
         await update.message.reply_text(
             f"Ошибка получения рынка: {exc}"
         )
 
+
+# ============================================================
+# NEWS
+# ============================================================
 
 async def news(
     update: Update,
@@ -554,12 +800,15 @@ async def news(
 ) -> None:
 
     if not is_admin(update):
+
         await update.message.reply_text(
             "Команда доступна только администратору."
         )
+
         return
 
     try:
+
         await update.message.reply_text(
             "🔎 Ищу актуальные новости..."
         )
@@ -568,16 +817,24 @@ async def news(
 
         await send_long_message(
             update,
-            "🌍 TRD NEWS\n\n" + result,
+            "🌍 TRD NEWS\n\n"
+            + result,
         )
 
     except Exception as exc:
-        logger.exception("News error")
+
+        logger.exception(
+            "News error"
+        )
 
         await update.message.reply_text(
             f"Ошибка поиска новостей: {exc}"
         )
 
+
+# ============================================================
+# PULSE
+# ============================================================
 
 async def pulse(
     update: Update,
@@ -585,18 +842,26 @@ async def pulse(
 ) -> None:
 
     if not is_admin(update):
+
         await update.message.reply_text(
             "Команда доступна только администратору."
         )
+
         return
 
     try:
+
         await update.message.reply_text(
             "⚡ Собираю TRD Pulse..."
         )
 
-        market_data = await get_market_data()
-        news_data = await get_news_analysis()
+        market_data = (
+            await get_market_data()
+        )
+
+        news_data = (
+            await get_news_analysis()
+        )
 
         result = await generate_pulse(
             market_data,
@@ -609,12 +874,19 @@ async def pulse(
         )
 
     except Exception as exc:
-        logger.exception("Pulse error")
+
+        logger.exception(
+            "Pulse error"
+        )
 
         await update.message.reply_text(
             f"Ошибка генерации Pulse: {exc}"
         )
 
+
+# ============================================================
+# PUBLISH
+# ============================================================
 
 async def publish(
     update: Update,
@@ -622,36 +894,50 @@ async def publish(
 ) -> None:
 
     if not is_admin(update):
+
         await update.message.reply_text(
             "Команда доступна только администратору."
         )
+
         return
 
     try:
+
         await update.message.reply_text(
-            "⚡ Создаю TRD Pulse и готовлю публикацию..."
+            "⚡ Создаю TRD Pulse..."
         )
 
-        market_data = await get_market_data()
-        news_data = await get_news_analysis()
+        market_data = (
+            await get_market_data()
+        )
+
+        news_data = (
+            await get_news_analysis()
+        )
 
         result = await generate_pulse(
             market_data,
             news_data,
         )
 
+        # В первой версии НЕ используем HTML parse mode.
+        # Это предотвращает ошибки Telegram,
+        # если модель вернет специальные символы.
+
         await context.bot.send_message(
             chat_id=TELEGRAM_CHANNEL_ID,
             text=result,
-            parse_mode=ParseMode.HTML,
         )
 
         await update.message.reply_text(
-            "✅ TRD Pulse опубликован в канал."
+            "✅ TRD Pulse опубликован."
         )
 
     except Exception as exc:
-        logger.exception("Publish error")
+
+        logger.exception(
+            "Publish error"
+        )
 
         await update.message.reply_text(
             f"Ошибка публикации: {exc}"
@@ -667,9 +953,9 @@ async def error_handler(
     context: ContextTypes.DEFAULT_TYPE,
 ) -> None:
 
-    logger.exception(
-        "Unhandled exception",
-        exc_info=context.error,
+    logger.error(
+        "Unhandled exception: %s",
+        context.error,
     )
 
 
@@ -683,28 +969,45 @@ def main() -> None:
 
     application = (
         Application.builder()
-        .token(TELEGRAM_BOT_TOKEN)
+        .token(
+            TELEGRAM_BOT_TOKEN
+        )
         .build()
     )
 
     application.add_handler(
-        CommandHandler("start", start)
+        CommandHandler(
+            "start",
+            start,
+        )
     )
 
     application.add_handler(
-        CommandHandler("market", market)
+        CommandHandler(
+            "market",
+            market,
+        )
     )
 
     application.add_handler(
-        CommandHandler("news", news)
+        CommandHandler(
+            "news",
+            news,
+        )
     )
 
     application.add_handler(
-        CommandHandler("pulse", pulse)
+        CommandHandler(
+            "pulse",
+            pulse,
+        )
     )
 
     application.add_handler(
-        CommandHandler("publish", publish)
+        CommandHandler(
+            "publish",
+            publish,
+        )
     )
 
     application.add_error_handler(
