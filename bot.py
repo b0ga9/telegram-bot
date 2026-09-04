@@ -2137,6 +2137,41 @@ async def show_publish_preview(query, context):
 
 
 
+async def publish_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Открывает редактор для последнего сгенерированного поста.
+
+    Если /news или /pulse уже создали текст и визуал, повторно выбирать
+    «с картинкой/без картинки» не нужно: визуал подхватывается автоматически.
+    """
+    if not await admin_only(update):
+        return
+
+    text = (
+        context.user_data.get("publish_text")
+        or context.user_data.get("pulse_text")
+        or context.user_data.get("news_text")
+        or ""
+    ).strip()
+
+    photo_path = context.user_data.get("publish_photo_path")
+
+    if not text:
+        await update.message.reply_text(
+            "📝 Пока нет готового поста. Сначала используй /news или /pulse."
+        )
+        return
+
+    context.user_data["publish_text"] = text
+    context.user_data["publish_waiting"] = None
+
+    if photo_path and Path(photo_path).exists():
+        context.user_data["publish_photo"] = None
+    else:
+        context.user_data["publish_photo_path"] = None
+
+    await send_publish_preview(update.message, context)
+
+
 async def photo_handler(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
