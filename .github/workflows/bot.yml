@@ -13,7 +13,6 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-          cache: "pip"
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
@@ -23,8 +22,8 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHANNEL_ID: ${{ secrets.TELEGRAM_CHANNEL_ID }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          OPENAI_MODEL: gpt-5.6-luna
-          OPENAI_IMAGE_MODEL: gpt-image-2
+          OPENAI_MODEL: ${{ secrets.OPENAI_MODEL }}
+          OPENAI_IMAGE_MODEL: ${{ secrets.OPENAI_IMAGE_MODEL }}
           ADMIN_USER_ID: ${{ secrets.ADMIN_USER_ID }}
           TRD_VISUAL_ENABLED: "true"
           TRD_VISUAL_DIR: /tmp/trd_visuals
