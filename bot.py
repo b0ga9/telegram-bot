@@ -860,35 +860,469 @@ async def pulse_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # AUTOMATIC MONITORING
 # ============================================================
 
+# Проверяем рынок чаще, но AI вызываем только при сильных событиях.
+PRICE_CHECK_INTERVAL = 5 * 60       # 5 минут
+
+# Сколько измерений цены хранить для каждой монеты.
+# При проверке раз в 5 минут это примерно 10 часов истории.
+PRICE_HISTORY_LIMIT = 120
+
+
 def get_state(application):
     state = application.bot_data
 
+    state.setdefault("price_history", {})
     state.setdefault("last_prices", {})
     state.setdefault("last_price_alert", {})
+
+    state.setdefault("last_market_alert_at", 0)
+    state.setdefault("last_auto_pulse_at", 0)
+
     state.setdefault("last_news_key", None)
     state.setdefault("last_news_hash", None)
     state.setdefault("last_auto_news_at", 0)
-    state.setdefault("last_auto_pulse_at", 0)
     state.setdefault("last_news_text", "")
-    state.setdefault("monitor_started_at", datetime.now(timezone.utc))
+
+    state.setdefault(
+        "monitor_started_at",
+        datetime.now(timezone.utc),
+    )
 
     return state
 
 
-def find_price_triggers(coins, state):
-    triggers = []
-
+def update_price_history(coins, state):
+    """Сохраняет текущие цены в историю."""
     now = asyncio.get_running_loop().time()
 
     for coin in coins:
         coin_id = coin.get("id")
+        price = coin.get("current_price")
 
-        if not coin_id:
+        if not coin_id or price is None:
             continue
 
-        symbol = coin.get("symbol", "").upper()
+        history = state["price_history"].setdefault(
+            coin_id,
+            [],
+        )
 
-        one_hour = price_change_1h(coin)
+        history.append(
+            {
+                "time": now,
+                "price": price,
+            }
+        )
+
+        if len(history) > PRICE_HISTORY_LIMIT:
+            del history[:-PRICE_HISTORY_LIMIT]
+
+        # Сохраняем также последнее состояние для совместимости.
+        state["last_prices"][coin_id] = {
+            "price": price,
+            "1h": price_change_1h(coin),
+            "24h": price_change_24h(coin),
+        }
+
+
+def get_price_change_from_history(history, seconds):
+    """Изменение цены относительно ближайшей точки в прошлом."""
+    if len(history) < 2:
+        return None
+
+    now = history[-1]["time"]
+    current_price = history[-1]["price"]
+
+    if not current_price:
+        return None
+
+    target_time = now - seconds
+
+    candidates = [
+        point
+        for point in history
+        if point["time"] <= target_time
+    ]
+
+    if not candidates:
+        return None
+
+    old_price = candidates[-1].get("price")
+
+    if not old_price:
+        return None
+
+    return (
+        (current_price - old_price)
+        / old_price
+        * 100
+    )
+
+
+def get_coin_history_metrics(coin, state):
+    """Возвращает изменения за 5m, 15m, 30m, 1h и 24h."""
+    if not coin:
+        return {
+            "5m": None,
+            "15m": None,
+            "30m": None,
+            "1h": None,
+            "24h": 0,
+        }
+
+    coin_id = coin.get("id")
+
+    history = state["price_history"].get(
+        coin_id,
+        [],
+    )
+
+    metrics = {
+        "5m": get_price_change_from_history(
+            history,
+            5 * 60,
+        ),
+        "15m": get_price_change_from_history(
+            history,
+            15 * 60,
+        ),
+        "30m": get_price_change_from_history(
+            history,
+            30 * 60,
+        ),
+        "1h": get_price_change_from_history(
+            history,
+            60 * 60,
+        ),
+        "24h": price_change_24h(coin),
+    }
+
+    # До накопления собственной часовой истории
+    # используем значение CoinGecko.
+    if metrics["1h"] is None:
+        metrics["1h"] = price_change_1h(coin)
+
+    return metrics
+
+
+def calculate_acceleration(metrics):
+    """
+    Сравнивает скорость последних 5 минут
+    со средней скоростью движения за 1 час.
+
+    > 1.5 — заметное ускорение
+    > 2.0 — сильное ускорение
+    """
+    change_5m = metrics.get("5m")
+    change_1h = metrics.get("1h")
+
+    if (
+        change_5m is None
+        or change_1h is None
+        or abs(change_1h) < 0.01
+    ):
+        return 0
+
+    expected_speed = abs(change_1h) / 12
+
+    if expected_speed <= 0:
+        return 0
+
+    return abs(change_5m) / expected_speed
+
+
+def calculate_market_breadth(coins, state):
+    """Анализирует, насколько широко рынок движется вверх или вниз."""
+    positive = 0
+    negative = 0
+    neutral = 0
+    changes = []
+
+    for coin in coins:
+        metrics = get_coin_history_metrics(
+            coin,
+            state,
+        )
+
+        change = metrics.get("1h")
+
+        if change is None:
+            continue
+
+        changes.append(change)
+
+        if change > 0.15:
+            positive += 1
+        elif change < -0.15:
+            negative += 1
+        else:
+            neutral += 1
+
+    total = positive + negative + neutral
+
+    if total == 0:
+        return {
+            "positive": 0,
+            "negative": 0,
+            "neutral": 0,
+            "positive_pct": 0,
+            "negative_pct": 0,
+            "average_change": 0,
+        }
+
+    average_change = (
+        sum(changes) / len(changes)
+        if changes
+        else 0
+    )
+
+    return {
+        "positive": positive,
+        "negative": negative,
+        "neutral": neutral,
+        "positive_pct": positive / total * 100,
+        "negative_pct": negative / total * 100,
+        "average_change": average_change,
+    }
+
+
+def find_coin(coins, coin_id):
+    return next(
+        (
+            coin
+            for coin in coins
+            if coin.get("id") == coin_id
+        ),
+        None,
+    )
+
+
+def classify_market_regime(
+    btc_metrics,
+    eth_metrics,
+    breadth,
+    market,
+):
+    """Определяет текущий тип движения рынка."""
+    btc_change = btc_metrics.get("1h") or 0
+    eth_change = eth_metrics.get("1h") or 0
+
+    positive_pct = breadth["positive_pct"]
+    negative_pct = breadth["negative_pct"]
+
+    if (
+        btc_change > 0.8
+        and eth_change > 0.8
+        and positive_pct >= 70
+    ):
+        return "BROAD_RALLY"
+
+    if (
+        btc_change < -0.8
+        and eth_change < -0.8
+        and negative_pct >= 70
+    ):
+        return "BROAD_SELLOFF"
+
+    if (
+        abs(btc_change) >= 1.5
+        and positive_pct < 70
+        and negative_pct < 70
+    ):
+        return "BTC_LED_MOVE"
+
+    if (
+        abs(btc_change) < 0.8
+        and eth_change > 1
+        and positive_pct >= 70
+    ):
+        return "ALTCOIN_ROTATION"
+
+    if (
+        btc_change > 0.5
+        and eth_change < -0.5
+    ) or (
+        btc_change < -0.5
+        and eth_change > 0.5
+    ):
+        return "MARKET_DIVERGENCE"
+
+    return "NEUTRAL"
+
+
+def calculate_market_score(
+    btc_metrics,
+    eth_metrics,
+    breadth,
+    market,
+):
+    """
+    Score:
+    0-3  — шум
+    4-6  — наблюдение
+    7-9  — Market Alert
+    10+  — сильное событие + Pulse
+    """
+    score = 0
+    reasons = []
+
+    btc_change = btc_metrics.get("1h") or 0
+    eth_change = eth_metrics.get("1h") or 0
+
+    btc_acceleration = calculate_acceleration(
+        btc_metrics
+    )
+
+    eth_acceleration = calculate_acceleration(
+        eth_metrics
+    )
+
+    # BTC
+    if abs(btc_change) >= 1:
+        score += 2
+        reasons.append(
+            f"BTC 1h {format_pct(btc_change)}"
+        )
+
+    if abs(btc_change) >= 2:
+        score += 2
+
+    # ETH
+    if abs(eth_change) >= 1.5:
+        score += 2
+        reasons.append(
+            f"ETH 1h {format_pct(eth_change)}"
+        )
+
+    # BTC + ETH подтверждают направление
+    same_direction = (
+        btc_change > 0
+        and eth_change > 0
+    ) or (
+        btc_change < 0
+        and eth_change < 0
+    )
+
+    if (
+        same_direction
+        and abs(btc_change) >= 0.5
+        and abs(eth_change) >= 0.5
+    ):
+        score += 2
+        reasons.append(
+            "BTC и ETH подтверждают движение"
+        )
+
+    # Ширина рынка
+    if breadth["positive_pct"] >= 70:
+        score += 3
+        reasons.append(
+            f"{breadth['positive_pct']:.0f}% монет растут"
+        )
+
+    if breadth["negative_pct"] >= 70:
+        score += 3
+        reasons.append(
+            f"{breadth['negative_pct']:.0f}% монет снижаются"
+        )
+
+    # Среднее изменение рынка
+    average_change = breadth["average_change"]
+
+    if abs(average_change) >= 1:
+        score += 1
+
+    if abs(average_change) >= 2:
+        score += 1
+
+    # Ускорение BTC
+    if btc_acceleration >= 1.5:
+        score += 2
+        reasons.append(
+            "BTC ускоряет движение"
+        )
+
+    # Ускорение ETH
+    if eth_acceleration >= 1.5:
+        score += 1
+
+    # Общий Market Cap
+    market_cap_change = (
+        market.get(
+            "market_cap_change_24h"
+        )
+        or 0
+    )
+
+    if abs(market_cap_change) >= 2:
+        score += 1
+
+    if abs(market_cap_change) >= 4:
+        score += 1
+
+    return {
+        "score": score,
+        "reasons": reasons,
+        "btc_acceleration": btc_acceleration,
+        "eth_acceleration": eth_acceleration,
+    }
+
+
+def analyze_market_signal(
+    coins,
+    market,
+    state,
+):
+    """Главный анализатор текущего состояния рынка."""
+    btc = find_coin(
+        coins,
+        "bitcoin",
+    )
+
+    eth = find_coin(
+        coins,
+        "ethereum",
+    )
+
+    btc_metrics = get_coin_history_metrics(
+        btc,
+        state,
+    )
+
+    eth_metrics = get_coin_history_metrics(
+        eth,
+        state,
+    )
+
+    breadth = calculate_market_breadth(
+        coins,
+        state,
+    )
+
+    score_data = calculate_market_score(
+        btc_metrics,
+        eth_metrics,
+        breadth,
+        market,
+    )
+
+    regime = classify_market_regime(
+        btc_metrics,
+        eth_metrics,
+        breadth,
+        market,
+    )
+
+    triggers = []
+
+    for coin in coins:
+        metrics = get_coin_history_metrics(
+            coin,
+            state,
+        )
+
+        change = metrics.get("1h") or 0
+        coin_id = coin.get("id")
 
         if coin_id == "bitcoin":
             threshold = BTC_ALERT_1H
@@ -897,136 +1331,313 @@ def find_price_triggers(coins, state):
         else:
             threshold = ALT_ALERT_1H
 
-        if abs(one_hour) < threshold:
-            continue
+        if abs(change) >= threshold:
+            triggers.append(
+                {
+                    "id": coin_id,
+                    "symbol": coin.get(
+                        "symbol",
+                        "",
+                    ).upper(),
+                    "name": coin.get(
+                        "name",
+                        "",
+                    ),
+                    "price": coin.get(
+                        "current_price"
+                    ),
+                    "1h": change,
+                    "24h": metrics.get(
+                        "24h"
+                    ),
+                    "metrics": metrics,
+                }
+            )
 
-        last_alert = state["last_price_alert"].get(
-            coin_id,
-            0,
-        )
-
-        if now - last_alert < PRICE_ALERT_COOLDOWN:
-            continue
-
-        triggers.append(
-            {
-                "id": coin_id,
-                "symbol": symbol,
-                "name": coin.get("name", symbol),
-                "price": coin.get("current_price"),
-                "1h": one_hour,
-                "24h": price_change_24h(coin),
-            }
-        )
-
-    return sorted(
+    triggers = sorted(
         triggers,
         key=lambda x: abs(x["1h"]),
         reverse=True,
     )
 
+    return {
+        "score": score_data["score"],
+        "reasons": score_data["reasons"],
+        "btc_acceleration": (
+            score_data["btc_acceleration"]
+        ),
+        "eth_acceleration": (
+            score_data["eth_acceleration"]
+        ),
+        "regime": regime,
+        "triggers": triggers,
+        "breadth": breadth,
+        "btc_metrics": btc_metrics,
+        "eth_metrics": eth_metrics,
+    }
 
-def build_price_alert(triggers):
-    if not triggers:
-        return None
+
+def build_market_alert(signal):
+    """Формирует текст автоматического рыночного алерта."""
+    score = signal["score"]
+    regime = signal["regime"]
+
+    btc = signal["btc_metrics"]
+    eth = signal["eth_metrics"]
+    breadth = signal["breadth"]
+
+    if regime == "BROAD_RALLY":
+        headline = (
+            "🚀 Широкое ускорение рынка вверх."
+        )
+    elif regime == "BROAD_SELLOFF":
+        headline = (
+            "🔻 Усилилось широкое снижение рынка."
+        )
+    elif regime == "BTC_LED_MOVE":
+        headline = (
+            "₿ BTC стал главным драйвером движения."
+        )
+    elif regime == "ALTCOIN_ROTATION":
+        headline = (
+            "🔥 Усилилась активность в альткоинах."
+        )
+    elif regime == "MARKET_DIVERGENCE":
+        headline = (
+            "⚠️ На рынке появилось заметное расхождение."
+        )
+    else:
+        strongest = (
+            signal["triggers"][0]
+            if signal["triggers"]
+            else None
+        )
+
+        if strongest and strongest["1h"] > 0:
+            headline = (
+                "📈 Рынок показывает заметное ускорение."
+            )
+        else:
+            headline = (
+                "📉 На рынке усилилось давление."
+            )
 
     lines = [
         "🚨 <b>TRD MARKET ALERT</b>",
         "",
+        headline,
+        "",
+        f"⚡ Market Strength: <b>{score}</b>",
+        "",
     ]
 
-    strongest = triggers[0]
+    btc_change = btc.get("1h")
 
-    if strongest["1h"] > 0:
+    if btc_change is not None:
         lines.append(
-            "⚡ Рынок заметно ускорился вверх."
-        )
-    else:
-        lines.append(
-            "⚡ На рынке усилилось движение вниз."
+            "₿ <b>BTC</b> "
+            f"{format_pct(btc_change)} за 1ч"
         )
 
-    lines.append("")
+    eth_change = eth.get("1h")
 
-    for item in triggers[:3]:
-        emoji = "🟢" if item["1h"] > 0 else "🔴"
-
+    if eth_change is not None:
         lines.append(
-            f"{emoji} <b>{item['symbol']}</b> "
-            f"{format_price(item['price'])} "
-            f"<b>{format_pct(item['1h'])}</b> за 1ч"
+            "Ξ <b>ETH</b> "
+            f"{format_pct(eth_change)} за 1ч"
         )
 
     lines.append("")
+
     lines.append(
-        "📊 Сигнал основан на заметном изменении цены."
+        "<b>🌐 Market breadth</b>"
     )
+
+    lines.append(
+        f"🟢 Рост: {breadth['positive_pct']:.0f}%"
+    )
+
+    lines.append(
+        f"🔴 Падение: {breadth['negative_pct']:.0f}%"
+    )
+
+    if signal["btc_acceleration"] >= 1.5:
+        lines.append("")
+        lines.append(
+            "⚡ BTC ускоряет движение."
+        )
+
+    if signal["triggers"]:
+        lines.append("")
+        lines.append(
+            "<b>Наиболее сильные движения</b>"
+        )
+
+        for item in signal["triggers"][:3]:
+            emoji = (
+                "🟢"
+                if item["1h"] > 0
+                else "🔴"
+            )
+
+            lines.append(
+                f"{emoji} "
+                f"<b>{item['symbol']}</b> "
+                f"{format_price(item['price'])} "
+                f"<b>{format_pct(item['1h'])}</b>"
+            )
 
     return "\n".join(lines)
 
 
-def should_trigger_pulse(triggers):
-    if not triggers:
-        return False
+def should_publish_market_alert(signal):
+    """Решает, публиковать ли Market Alert."""
+    if signal["score"] >= 7:
+        return True
 
-    # BTC/ETH strong move
-    for item in triggers:
-        if item["id"] in ("bitcoin", "ethereum"):
+    for item in signal["triggers"]:
+        if (
+            item["id"] == "bitcoin"
+            and abs(item["1h"]) >= BTC_ALERT_1H
+        ):
             return True
 
-    # Broad altcoin move
-    return len(triggers) >= 3
+    breadth = signal["breadth"]
+
+    if (
+        breadth["positive_pct"] >= 80
+        or breadth["negative_pct"] >= 80
+    ):
+        return True
+
+    return False
+
+
+def should_trigger_pulse(signal):
+    """Решает, нужен ли AI Pulse."""
+    if signal["score"] >= 10:
+        return True
+
+    if signal["regime"] in (
+        "BROAD_RALLY",
+        "BROAD_SELLOFF",
+        "MARKET_DIVERGENCE",
+    ):
+        return True
+
+    if signal["btc_acceleration"] >= 2:
+        return True
+
+    return False
 
 
 async def automatic_price_check(application):
+    """Главная автоматическая проверка рынка."""
     state = get_state(application)
 
     try:
+        # 1. Получаем цены.
         coins = await get_monitored_prices()
 
-        triggers = find_price_triggers(
+        # 2. Сохраняем историю.
+        update_price_history(
             coins,
             state,
         )
 
-        # Save prices
-        for coin in coins:
-            state["last_prices"][coin["id"]] = {
-                "price": coin.get("current_price"),
-                "1h": price_change_1h(coin),
-                "24h": price_change_24h(coin),
-            }
+        # 3. Получаем общую информацию о рынке.
+        market = await get_market_data()
 
-        if not triggers:
-            logger.info("Automatic price check: no trigger")
+        # 4. Анализируем рынок.
+        signal = analyze_market_signal(
+            coins,
+            market,
+            state,
+        )
+
+        logger.info(
+            "Market analysis | "
+            "score=%s regime=%s "
+            "breadth_up=%.0f%% "
+            "breadth_down=%.0f%% "
+            "btc_1h=%s eth_1h=%s",
+            signal["score"],
+            signal["regime"],
+            signal["breadth"][
+                "positive_pct"
+            ],
+            signal["breadth"][
+                "negative_pct"
+            ],
+            format_pct(
+                signal["btc_metrics"].get("1h")
+            ),
+            format_pct(
+                signal["eth_metrics"].get("1h")
+            ),
+        )
+
+        # 5. Проверяем необходимость Alert.
+        if not should_publish_market_alert(
+            signal
+        ):
             return
 
         now = asyncio.get_running_loop().time()
 
-        alert = build_price_alert(triggers)
+        last_alert = state[
+            "last_market_alert_at"
+        ]
 
-        if alert:
-            await application.bot.send_message(
-                chat_id=TELEGRAM_CHANNEL_ID,
-                text=alert,
-                parse_mode=ParseMode.HTML,
-                disable_web_page_preview=True,
+        # Общий cooldown на автоматические алерты.
+        if (
+            now - last_alert
+            < PRICE_ALERT_COOLDOWN
+        ):
+            logger.info(
+                "Market alert skipped: cooldown"
             )
+            return
 
-            for item in triggers[:3]:
-                state["last_price_alert"][item["id"]] = now
+        # 6. Публикуем Alert.
+        alert = build_market_alert(
+            signal
+        )
 
-        # Automatic Pulse
-        if should_trigger_pulse(triggers):
-            last_pulse = state["last_auto_pulse_at"]
+        await application.bot.send_message(
+            chat_id=TELEGRAM_CHANNEL_ID,
+            text=alert,
+            parse_mode=ParseMode.HTML,
+            disable_web_page_preview=True,
+        )
 
-            if now - last_pulse >= PULSE_COOLDOWN:
+        state[
+            "last_market_alert_at"
+        ] = now
+
+        # 7. При сильном событии запускаем Pulse.
+        if should_trigger_pulse(signal):
+            last_pulse = state[
+                "last_auto_pulse_at"
+            ]
+
+            if (
+                now - last_pulse
+                >= PULSE_COOLDOWN
+            ):
                 await automatic_pulse(
                     application,
                     coins,
+                    signal,
                 )
 
-                state["last_auto_pulse_at"] = now
+                state[
+                    "last_auto_pulse_at"
+                ] = now
+
+        logger.info(
+            "Automatic market alert published"
+        )
 
     except Exception:
         logger.exception(
@@ -1034,18 +1645,47 @@ async def automatic_price_check(application):
         )
 
 
-async def automatic_pulse(application, coins):
+async def automatic_pulse(
+    application,
+    coins,
+    signal=None,
+):
+    """
+    Генерирует AI Pulse.
+
+    signal передаётся в prompt, чтобы AI понимал,
+    какое событие вызвало публикацию.
+    """
     try:
         market = await get_market_data()
 
-        recent_news = get_state(application).get(
+        recent_news = get_state(
+            application
+        ).get(
             "last_news_text",
             "",
         )
 
+        signal_context = ""
+
+        if signal:
+            breadth = signal["breadth"]
+
+            signal_context = (
+                "\n\nАвтоматический сигнал рынка:\n"
+                f"Режим: {signal['regime']}\n"
+                f"Market Strength Score: {signal['score']}\n"
+                f"Рост рынка: "
+                f"{breadth['positive_pct']:.0f}%\n"
+                f"Падение рынка: "
+                f"{breadth['negative_pct']:.0f}%\n"
+                f"Ускорение BTC: "
+                f"{signal['btc_acceleration']:.2f}x\n"
+            )
+
         prompt = build_pulse_prompt(
             market,
-            recent_news,
+            recent_news + signal_context,
         )
 
         result = await openai_response(
@@ -1086,14 +1726,17 @@ async def automatic_news_check(application):
     try:
         result = await get_news_analysis()
 
-        state["last_auto_news_at"] = now
+        state[
+            "last_auto_news_at"
+        ] = now
 
-        importance, key, post = parse_news_result(
-            result
+        importance, key, post = (
+            parse_news_result(result)
         )
 
         logger.info(
-            "Automatic news: importance=%s key=%s",
+            "Automatic news: "
+            "importance=%s key=%s",
             importance,
             key,
         )
@@ -1106,10 +1749,15 @@ async def automatic_news_check(application):
             return
 
         fingerprint = hashlib.sha256(
-            post[:1000].lower().encode("utf-8")
+            post[:1000]
+            .lower()
+            .encode("utf-8")
         ).hexdigest()
 
-        if fingerprint == state["last_news_hash"]:
+        if (
+            fingerprint
+            == state["last_news_hash"]
+        ):
             logger.info(
                 "Automatic news skipped: duplicate"
             )
@@ -1127,9 +1775,17 @@ async def automatic_news_check(application):
             post,
         )
 
-        state["last_news_key"] = key
-        state["last_news_hash"] = fingerprint
-        state["last_news_text"] = post
+        state[
+            "last_news_key"
+        ] = key
+
+        state[
+            "last_news_hash"
+        ] = fingerprint
+
+        state[
+            "last_news_text"
+        ] = post
 
         logger.info(
             "Automatic NEWS published"
@@ -1147,7 +1803,7 @@ async def monitor_loop(application):
         "TRD automatic monitoring started"
     )
 
-    # Initial delay so bot can start normally
+    # Initial delay so bot can start normally.
     await asyncio.sleep(20)
 
     last_price_check = 0
@@ -1189,6 +1845,8 @@ async def monitor_loop(application):
             )
 
         await asyncio.sleep(30)
+
+
 
 
 # ============================================================
