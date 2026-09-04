@@ -57,7 +57,7 @@ def check_config() -> None:
 
 
 # ============================================================
-# HTTP
+# HTTP / COINGECKO
 # ============================================================
 
 async def get_json(
@@ -65,12 +65,15 @@ async def get_json(
     url: str,
     params: dict[str, Any] | None = None,
 ) -> dict[str, Any] | list[Any]:
+
     response = await client.get(
         url,
         params=params,
         timeout=30,
     )
+
     response.raise_for_status()
+
     return response.json()
 
 
@@ -79,7 +82,9 @@ async def get_json(
 # ============================================================
 
 async def get_market_data() -> dict[str, Any]:
+
     async with httpx.AsyncClient() as client:
+
         global_data = await get_json(
             client,
             f"{COINGECKO_API}/global",
@@ -120,20 +125,43 @@ async def get_market_data() -> dict[str, Any]:
     eth = coins.get("ETH", {})
 
     return {
-        "total_market_cap": data.get("total_market_cap", {}).get("usd"),
-        "total_volume": data.get("total_volume", {}).get("usd"),
-        "market_cap_change_24h": data.get("market_cap_change_percentage_24h_usd"),
-        "btc_dominance": data.get("market_cap_percentage", {}).get("btc"),
-        "active_cryptocurrencies": data.get("active_cryptocurrencies"),
+        "total_market_cap": data.get(
+            "total_market_cap",
+            {}
+        ).get("usd"),
+
+        "total_volume": data.get(
+            "total_volume",
+            {}
+        ).get("usd"),
+
+        "market_cap_change_24h": data.get(
+            "market_cap_change_percentage_24h_usd"
+        ),
+
+        "btc_dominance": data.get(
+            "market_cap_percentage",
+            {}
+        ).get("btc"),
+
+        "active_cryptocurrencies": data.get(
+            "active_cryptocurrencies"
+        ),
+
         "btc": btc,
         "eth": eth,
+
         "gainers": sorted_gainers[:5],
         "losers": sorted_losers[:5],
     }
 
 
-def format_market_data(data: dict[str, Any]) -> str:
+def format_market_data(
+    data: dict[str, Any]
+) -> str:
+
     def fmt_money(value: Any) -> str:
+
         if value is None:
             return "N/A"
 
@@ -149,22 +177,29 @@ def format_market_data(data: dict[str, Any]) -> str:
         return f"${value:,.0f}"
 
     def fmt_pct(value: Any) -> str:
+
         if value is None:
             return "N/A"
 
         return f"{value:+.2f}%"
 
-    def coin_line(coin: dict[str, Any]) -> str:
+    def coin_line(
+        coin: dict[str, Any]
+    ) -> str:
+
         return (
             f"{coin.get('symbol', '').upper()} "
             f"${coin.get('current_price', 0):,.2f} | "
-            f"1h {fmt_pct(coin.get('price_change_percentage_1h_in_currency'))} | "
-            f"24h {fmt_pct(coin.get('price_change_percentage_24h'))} | "
-            f"7d {fmt_pct(coin.get('price_change_percentage_7d_in_currency'))}"
+            f"1h "
+            f"{fmt_pct(coin.get('price_change_percentage_1h_in_currency'))} | "
+            f"24h "
+            f"{fmt_pct(coin.get('price_change_percentage_24h'))} | "
+            f"7d "
+            f"{fmt_pct(coin.get('price_change_percentage_7d_in_currency'))}"
         )
 
     lines = [
-        "📊 РЫНОК",
+        "📊 **РЫНОК**",
         "",
         f"Market Cap: {fmt_money(data['total_market_cap'])}",
         f"Volume 24h: {fmt_money(data['total_volume'])}",
@@ -172,13 +207,13 @@ def format_market_data(data: dict[str, Any]) -> str:
         f"BTC Dominance: {data['btc_dominance']:.2f}%",
         f"Active Coins: {data['active_cryptocurrencies']:,}",
         "",
-        "₿ BTC",
+        "₿ **BTC**",
         coin_line(data["btc"]),
         "",
-        "Ξ ETH",
+        "Ξ **ETH**",
         coin_line(data["eth"]),
         "",
-        "🔥 ЛИДЕРЫ",
+        "🔥 **ЛИДЕРЫ**",
     ]
 
     for coin in data["gainers"]:
@@ -189,7 +224,7 @@ def format_market_data(data: dict[str, Any]) -> str:
 
     lines.extend([
         "",
-        "🔻 СЛАБЫЕ",
+        "🔻 **СЛАБЫЕ**",
     ])
 
     for coin in data["losers"]:
@@ -232,6 +267,7 @@ async def openai_response(
         ]
 
     async with httpx.AsyncClient() as client:
+
         response = await client.post(
             OPENAI_API,
             headers=headers,
@@ -239,33 +275,56 @@ async def openai_response(
             timeout=120,
         )
 
+        # ----------------------------------------------------
+        # Detailed OpenAI error
+        # ----------------------------------------------------
+
         if response.status_code >= 400:
-    try:
-        error_data = response.json()
-    except Exception:
-        error_data = response.text
 
-    raise RuntimeError(
-        f"OpenAI API error {response.status_code}: {error_data}"
-    )
+            try:
+                error_data = response.json()
 
-result = response.json()
+            except Exception:
+                error_data = response.text
+
+            logger.error(
+                "OpenAI API error %s: %s",
+                response.status_code,
+                error_data,
+            )
+
+            raise RuntimeError(
+                f"OpenAI API error "
+                f"{response.status_code}: "
+                f"{error_data}"
+            )
+
+        result = response.json()
 
     output_text = result.get("output_text")
 
     if output_text:
         return output_text.strip()
 
-    # Fallback for Responses API output structure.
     parts = []
 
     for item in result.get("output", []):
+
         for content in item.get("content", []):
+
             text = content.get("text")
+
             if text:
                 parts.append(text)
 
-    return "\n".join(parts).strip()
+    final_text = "\n".join(parts).strip()
+
+    if not final_text:
+        raise RuntimeError(
+            "OpenAI returned an empty response."
+        )
+
+    return final_text
 
 
 # ============================================================
@@ -273,32 +332,34 @@ result = response.json()
 # ============================================================
 
 async def get_news_analysis() -> str:
+
     prompt = """
 Ты — аналитический модуль TRD Pulse.
 
-Найди через Web Search самые важные финансовые и макроэкономические события
-за последние 24 часа.
+Найди через Web Search самые важные финансовые и
+макроэкономические события за последние 24 часа.
 
-Приоритет:
+ПРИОРИТЕТ:
 
 1. ФРС / ECB / другие центральные банки
-2. инфляция CPI / PCE
-3. рынок труда / NFP / Jobless Claims
+2. CPI / PCE / инфляция
+3. NFP / рынок труда / Jobless Claims
 4. ставки и доходности облигаций
 5. доллар США
 6. S&P 500 / Nasdaq
 7. золото / нефть
 8. криптовалюты
-9. геополитика, санкции и заявления правительств
+9. геополитика и санкции
 
-Правила:
+ПРАВИЛА:
 
 - Не придумывай события.
 - Отделяй ФАКТ от ИНТЕРПРЕТАЦИИ.
-- Для важных утверждений используй надежные источники.
-- Если есть сомнение — прямо укажи это.
+- Используй надежные источники.
+- Если информация не подтверждена — укажи это.
 - Не давай торговых рекомендаций.
 - Не используй HTML.
+- Не показывай длинные URL обычным текстом.
 
 ФОРМАТИРОВАНИЕ:
 
@@ -307,18 +368,20 @@ async def get_news_analysis() -> str:
 **жирный**
 *курсив*
 ***жирный курсив***
-`цены, тикеры, проценты`
-> цитаты
+`цены / тикеры / проценты`
 
-Ссылки обязательно оформляй как Markdown-гиперссылки:
+Для цитат:
+
+> текст цитаты
+
+Ссылки обязательно делай гиперссылками:
 
 [Reuters](https://...)
-[Bloomberg](https://...)
+[Associated Press](https://...)
 [Federal Reserve](https://...)
+[ECB](https://...)
 
-НЕ показывай длинные URL обычным текстом.
-
-Формат:
+ФОРМАТ:
 
 📰 **TRD NEWS**
 
@@ -336,11 +399,15 @@ async def get_news_analysis() -> str:
 
 ━━━━━━━━━━━━
 
+**2. Следующее событие**
+
+...
+
 В конце:
 
-***ИТОГ:*** кратко опиши, что сейчас является главным фактором для рынков.
+***ИТОГ:*** кратко опиши главный фактор,
+который сейчас влияет на рынки.
 """
-
 
     return await openai_response(
         prompt,
@@ -353,15 +420,19 @@ async def get_news_analysis() -> str:
 # ============================================================
 
 async def generate_pulse() -> str:
+
     market_data = await get_market_data()
-    market_text = format_market_data(market_data)
+
+    market_text = format_market_data(
+        market_data
+    )
 
     news = await get_news_analysis()
 
     prompt = f"""
 Ты — главный аналитический модуль TRD Pulse.
 
-Твоя задача — объединить данные рынка и актуальные новости.
+Объедини данные рынка и актуальные новости.
 
 ДАННЫЕ РЫНКА:
 
@@ -376,25 +447,29 @@ async def generate_pulse() -> str:
 ВАЖНО:
 
 - Не придумывай данные.
-- Не добавляй события, которых нет в предоставленных данных.
+- Не добавляй события, которых нет в данных.
 - Разделяй факты и интерпретации.
 - Не давай торговых рекомендаций.
-- Не говори "покупать", "продавать", "лонг", "шорт".
+- Не говори "покупать", "продавать",
+  "лонг", "шорт".
 - Не используй HTML.
 
-Используй Markdown:
+ФОРМАТИРОВАНИЕ:
 
 **жирный**
 *курсив*
 ***жирный курсив***
 `цены / тикеры / проценты`
-> цитаты
 
-Источники оформляй только гиперссылками:
+Цитаты:
+
+> текст
+
+Источники:
 
 [Reuters](https://...)
 [Federal Reserve](https://...)
-[AP](https://...)
+[ECB](https://...)
 
 Никаких длинных URL в тексте.
 
@@ -454,7 +529,7 @@ async def generate_pulse() -> str:
 
 🧠 **ЧТО ПРОИСХОДИТ**
 
-Краткий анализ текущей ситуации.
+Краткий анализ.
 
 ━━━━━━━━━━━━
 
@@ -466,7 +541,7 @@ async def generate_pulse() -> str:
 
 ***TRD SIGNAL***
 
-Выбери одно:
+Выбери:
 
 🟢 **RISK-ON**
 🟡 **NEUTRAL**
@@ -474,9 +549,8 @@ async def generate_pulse() -> str:
 
 И объясни выбор одной короткой фразой.
 
-Источники размести в конце соответствующих блоков.
+Источники размещай в конце соответствующих блоков.
 """
-
 
     return await openai_response(
         prompt,
@@ -488,31 +562,21 @@ async def generate_pulse() -> str:
 # MARKDOWN → TELEGRAM HTML
 # ============================================================
 
-def markdown_to_telegram_html(text: str) -> str:
-    """
-    Безопасно преобразует ограниченный Markdown
-    в Telegram HTML.
-
-    Поддерживается:
-
-    **bold**
-    *italic*
-    ***bold italic***
-    `code`
-    [text](url)
-    > quote
-    """
-
-    # --------------------------------------------------------
-    # Protect code spans
-    # --------------------------------------------------------
+def markdown_to_telegram_html(
+    text: str
+) -> str:
 
     code_blocks: list[str] = []
 
-    def protect_code(match: re.Match) -> str:
+    def protect_code(
+        match: re.Match
+    ) -> str:
+
         value = match.group(1)
 
-        placeholder = f"___TRD_CODE_{len(code_blocks)}___"
+        placeholder = (
+            f"___TRD_CODE_{len(code_blocks)}___"
+        )
 
         code_blocks.append(
             f"<code>{html.escape(value)}</code>"
@@ -520,6 +584,7 @@ def markdown_to_telegram_html(text: str) -> str:
 
         return placeholder
 
+    # Protect inline code
     text = re.sub(
         r"`([^`\n]+)`",
         protect_code,
@@ -532,18 +597,33 @@ def markdown_to_telegram_html(text: str) -> str:
 
     links: list[str] = []
 
-    def protect_link(match: re.Match) -> str:
-        label = html.escape(match.group(1))
+    def protect_link(
+        match: re.Match
+    ) -> str:
+
+        label = html.escape(
+            match.group(1)
+        )
+
         url = match.group(2).strip()
 
-        # Telegram HTML accepts http/https links.
-        if not re.match(r"^https?://", url, re.IGNORECASE):
-            return html.escape(match.group(0))
+        if not re.match(
+            r"^https?://",
+            url,
+            re.IGNORECASE,
+        ):
+            return html.escape(
+                match.group(0)
+            )
 
-        placeholder = f"___TRD_LINK_{len(links)}___"
+        placeholder = (
+            f"___TRD_LINK_{len(links)}___"
+        )
 
         links.append(
-            f'<a href="{html.escape(url, quote=True)}">{label}</a>'
+            f'<a href="{html.escape(url, quote=True)}">'
+            f"{label}"
+            f"</a>"
         )
 
         return placeholder
@@ -589,30 +669,39 @@ def markdown_to_telegram_html(text: str) -> str:
     text = re.sub(
         r"(?<!\*)\*([^*\n]+)\*(?!\*)",
         r"<i>\1</i>",
+        text,
     )
 
     # --------------------------------------------------------
-    # Quote
+    # Quotes
     # --------------------------------------------------------
 
     lines = text.splitlines()
+
     result_lines = []
 
     for line in lines:
+
         if line.startswith("&gt; "):
+
             result_lines.append(
                 f"<blockquote>{line[5:]}</blockquote>"
             )
+
         else:
+
             result_lines.append(line)
 
-    text = "\n".join(result_lines)
+    text = "\n".join(
+        result_lines
+    )
 
     # --------------------------------------------------------
     # Restore links
     # --------------------------------------------------------
 
     for index, value in enumerate(links):
+
         text = text.replace(
             f"___TRD_LINK_{index}___",
             value,
@@ -623,6 +712,7 @@ def markdown_to_telegram_html(text: str) -> str:
     # --------------------------------------------------------
 
     for index, value in enumerate(code_blocks):
+
         text = text.replace(
             f"___TRD_CODE_{index}___",
             value,
@@ -632,7 +722,7 @@ def markdown_to_telegram_html(text: str) -> str:
 
 
 # ============================================================
-# MESSAGE SENDING
+# SEND MESSAGE
 # ============================================================
 
 async def send_long_message(
@@ -640,30 +730,39 @@ async def send_long_message(
     text: str,
 ) -> None:
 
-    formatted = markdown_to_telegram_html(text)
+    formatted = markdown_to_telegram_html(
+        text
+    )
 
     max_length = 3900
 
-    for i in range(0, len(formatted), max_length):
-        chunk = formatted[i:i + max_length]
+    for i in range(
+        0,
+        len(formatted),
+        max_length,
+    ):
+
+        chunk = formatted[
+            i:i + max_length
+        ]
 
         try:
+
             await update.message.reply_text(
                 chunk,
                 parse_mode=ParseMode.HTML,
             )
 
         except Exception:
-            # Safety fallback:
-            # if Telegram rejects malformed formatting,
-            # send plain text instead.
+
             logger.exception(
-                "Telegram HTML formatting failed. "
-                "Sending plain text."
+                "Telegram HTML formatting failed."
             )
 
             await update.message.reply_text(
-                text[i:i + max_length],
+                text[
+                    i:i + max_length
+                ]
             )
 
 
@@ -671,11 +770,17 @@ async def send_long_message(
 # ADMIN
 # ============================================================
 
-def is_admin(update: Update) -> bool:
+def is_admin(
+    update: Update
+) -> bool:
+
     if not update.effective_user:
         return False
 
-    return str(update.effective_user.id) == str(ADMIN_USER_ID)
+    return (
+        str(update.effective_user.id)
+        == str(ADMIN_USER_ID)
+    )
 
 
 async def admin_only(
@@ -683,7 +788,9 @@ async def admin_only(
 ) -> bool:
 
     if not is_admin(update):
+
         if update.message:
+
             await update.message.reply_text(
                 "Команда доступна только администратору."
             )
@@ -723,8 +830,12 @@ async def market(
         return
 
     try:
+
         data = await get_market_data()
-        text = format_market_data(data)
+
+        text = format_market_data(
+            data
+        )
 
         await send_long_message(
             update,
@@ -732,7 +843,10 @@ async def market(
         )
 
     except Exception as exc:
-        logger.exception("Market error")
+
+        logger.exception(
+            "Market error"
+        )
 
         await update.message.reply_text(
             f"Ошибка получения рынка: {exc}"
@@ -748,6 +862,7 @@ async def news(
         return
 
     try:
+
         result = await get_news_analysis()
 
         await send_long_message(
@@ -756,10 +871,13 @@ async def news(
         )
 
     except Exception as exc:
-        logger.exception("News error")
+
+        logger.exception(
+            "News error"
+        )
 
         await update.message.reply_text(
-            f"Ошибка получения новостей: {exc}"
+            f"Ошибка поиска новостей: {exc}"
         )
 
 
@@ -772,6 +890,7 @@ async def pulse(
         return
 
     try:
+
         result = await generate_pulse()
 
         await send_long_message(
@@ -780,7 +899,10 @@ async def pulse(
         )
 
     except Exception as exc:
-        logger.exception("Pulse error")
+
+        logger.exception(
+            "Pulse error"
+        )
 
         await update.message.reply_text(
             f"Ошибка генерации Pulse: {exc}"
@@ -796,9 +918,12 @@ async def publish(
         return
 
     try:
+
         result = await generate_pulse()
 
-        formatted = markdown_to_telegram_html(result)
+        formatted = markdown_to_telegram_html(
+            result
+        )
 
         await context.bot.send_message(
             chat_id=TELEGRAM_CHANNEL_ID,
@@ -811,7 +936,10 @@ async def publish(
         )
 
     except Exception as exc:
-        logger.exception("Publish error")
+
+        logger.exception(
+            "Publish error"
+        )
 
         await update.message.reply_text(
             f"Ошибка публикации: {exc}"
@@ -823,6 +951,7 @@ async def publish(
 # ============================================================
 
 def main() -> None:
+
     check_config()
 
     application = (
@@ -832,26 +961,43 @@ def main() -> None:
     )
 
     application.add_handler(
-        CommandHandler("start", start)
+        CommandHandler(
+            "start",
+            start,
+        )
     )
 
     application.add_handler(
-        CommandHandler("market", market)
+        CommandHandler(
+            "market",
+            market,
+        )
     )
 
     application.add_handler(
-        CommandHandler("news", news)
+        CommandHandler(
+            "news",
+            news,
+        )
     )
 
     application.add_handler(
-        CommandHandler("pulse", pulse)
+        CommandHandler(
+            "pulse",
+            pulse,
+        )
     )
 
     application.add_handler(
-        CommandHandler("publish", publish)
+        CommandHandler(
+            "publish",
+            publish,
+        )
     )
 
-    logger.info("TRD Pulse bot started")
+    logger.info(
+        "TRD Pulse bot started"
+    )
 
     application.run_polling(
         allowed_updates=Update.ALL_TYPES
