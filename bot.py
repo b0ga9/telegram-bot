@@ -239,9 +239,17 @@ async def openai_response(
             timeout=120,
         )
 
-        response.raise_for_status()
+        if response.status_code >= 400:
+    try:
+        error_data = response.json()
+    except Exception:
+        error_data = response.text
 
-        result = response.json()
+    raise RuntimeError(
+        f"OpenAI API error {response.status_code}: {error_data}"
+    )
+
+result = response.json()
 
     output_text = result.get("output_text")
 
