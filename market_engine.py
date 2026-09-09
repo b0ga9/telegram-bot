@@ -119,11 +119,20 @@ class MarketEngine:
 
     def metrics(self, coin: dict[str, Any], now: float) -> dict[str, float | None]:
         coin_id = coin.get("id") or ""
+        change_1h = self._change_from_history(coin_id, now, 60 * 60)
+        if change_1h is None:
+            # CoinGecko already returns the current 1h change. Use it until
+            # local history has accumulated a full hour. This prevents the
+            # first monitoring runs from producing a fake 0% market breadth.
+            change_1h = coin.get("price_change_percentage_1h_in_currency")
+            if change_1h is None:
+                change_1h = coin.get("price_change_percentage_1h")
+
         return {
             "5m": self._change_from_history(coin_id, now, 5 * 60),
             "15m": self._change_from_history(coin_id, now, 15 * 60),
             "30m": self._change_from_history(coin_id, now, 30 * 60),
-            "1h": self._change_from_history(coin_id, now, 60 * 60),
+            "1h": change_1h,
             "24h": coin.get("price_change_percentage_24h_in_currency")
                    if coin.get("price_change_percentage_24h_in_currency") is not None
                    else coin.get("price_change_percentage_24h"),
