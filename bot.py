@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import datetime, timezone
+from html import escape
 
 import httpx
 from telegram import Update, ReplyKeyboardMarkup, KeyboardButton, BotCommand
@@ -45,6 +46,12 @@ def get_state(application: Application) -> dict:
     state.setdefault("last_news_hash", None)
     state.setdefault("last_news_text", "")
     state.setdefault("monitor_started_at", datetime.now(timezone.utc))
+    state.setdefault("startup_notification_sent", False)
+    state.setdefault("market_checks", 0)
+    state.setdefault("news_checks", 0)
+    state.setdefault("pulse_published", 0)
+    state.setdefault("market_published", 0)
+    state.setdefault("news_published", 0)
     return state
 
 
@@ -255,7 +262,12 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"<b>IDs:</b> {admins}<br><br>"
         f"<b>MARKET:</b> каждые {settings.market_check_interval // 60} мин<br>"
         f"<b>NEWS:</b> каждые {settings.news_check_interval // 60} мин<br>"
-        f"<b>Последняя NEWS:</b> {'есть' if state['last_news_text'] else 'нет'}"
+        f"<b>Последняя NEWS:</b> {'есть' if state['last_news_text'] else 'нет'}<br>"
+        f"<b>Проверок MARKET:</b> {state['market_checks']}<br>"
+        f"<b>Проверок NEWS:</b> {state['news_checks']}<br>"
+        f"<b>Публикаций MARKET:</b> {state['market_published']}<br>"
+        f"<b>Публикаций PULSE:</b> {state['pulse_published']}<br>"
+        f"<b>Публикаций NEWS:</b> {state['news_published']}"
         "</blockquote>",
         parse_mode=ParseMode.HTML,
     )
@@ -265,6 +277,7 @@ async def automatic_market_check(application: Application):
     settings = get_settings(application)
     state = get_state(application)
 
+    state["market_checks"] += 1
     market, _, signal = await collect_market(application)
     now = asyncio.get_running_loop().time()
 
@@ -279,6 +292,7 @@ async def automatic_market_check(application: Application):
             image_path,
         )
         state["last_market_at"] = now
+        state["market_published"] += 1
         logger.info("Automatic MARKET published")
 
     if should_publish_pulse(signal) and now - state["last_pulse_at"] >= settings.pulse_cooldown:
@@ -297,6 +311,7 @@ async def automatic_market_check(application: Application):
             format_pulse_post(pulse, signal),
         )
         state["last_pulse_at"] = now
+        state["pulse_published"] += 1
         logger.info("Automatic PULSE published")
 
 
@@ -308,6 +323,7 @@ async def automatic_news_check(application: Application):
     if now - state["last_news_at"] < settings.news_cooldown:
         return
 
+    state["news_checks"] += 1
     news = await fetch_important_news(
         get_client(application),
         api_url=settings.openai_api,
@@ -327,6 +343,7 @@ async def automatic_news_check(application: Application):
     state["last_news_text"] = text
     state["last_news_key"] = news.key
     state["last_news_hash"] = news.fingerprint
+    state["news_published"] += 1
     logger.info("Automatic NEWS published")
 
 
@@ -380,7 +397,12 @@ async def send_startup_notification(application: Application):
         "<b>Статус:</b> работает<br>"
         f"<b>Администраторов:</b> {len(settings.admin_user_ids)}<br>"
         f"<b>MARKET:</b> каждые {settings.market_check_interval // 60} мин<br>"
-        f"<b>NEWS:</b> каждые {settings.news_check_interval // 60} мин"
+        f"<b>NEWS:</b> каждые {settings.news_check_interval // 60} мин<br>"
+        f"<b>Проверок MARKET:</b> {state['market_checks']}<br>"
+        f"<b>Проверок NEWS:</b> {state['news_checks']}<br>"
+        f"<b>Публикаций MARKET:</b> {state['market_published']}<br>"
+        f"<b>Публикаций PULSE:</b> {state['pulse_published']}<br>"
+        f"<b>Публикаций NEWS:</b> {state['news_published']}"
         "</blockquote>"
     )
 
@@ -393,6 +415,7 @@ async def send_startup_notification(application: Application):
                 disable_web_page_preview=True,
                 reply_markup=main_menu(),
             )
+            logger.info("Startup notification sent to admin %s", user_id)
         except Exception:
             logger.exception("Startup notification failed for admin %s", user_id)
 
