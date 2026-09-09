@@ -80,7 +80,7 @@ def get_client(application: Application) -> httpx.AsyncClient:
 
 
 async def send_post(bot, chat_id, text: str, image_path=None, reply_markup=None):
-    # Telegram HTML does not support <br>. Engine formatters may produce it,
+    # Telegram HTML does not support \n. Engine formatters may produce it,
     # so normalize line-break tags at the final sending boundary.
     text = re.sub(r"<br\s*/?>", "\n", text, flags=re.IGNORECASE)
     if image_path and len(text) <= 1024:
@@ -150,12 +150,12 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.effective_message.reply_text(
         "<b>TRD PULSE</b>\n\n"
         "<blockquote>"
-        "<b>ПАНЕЛЬ УПРАВЛЕНИЯ</b><br><br>"
-        "<b>MARKET</b> — текущее состояние рынка<br>"
-        "<b>PULSE</b> — последний рыночный сигнал<br>"
-        "<b>NEWS</b> — важное событие<br>"
-        "<b>STATUS</b> — состояние системы<br><br>"
-        f"<b>Мониторинг:</b> активен<br>"
+        "<b>ПАНЕЛЬ УПРАВЛЕНИЯ</b>\n\n"
+        "<b>MARKET</b> — текущее состояние рынка\n"
+        "<b>PULSE</b> — последний рыночный сигнал\n"
+        "<b>NEWS</b> — важное событие\n"
+        "<b>STATUS</b> — состояние системы\n\n"
+        f"<b>Мониторинг:</b> активен\n"
         f"<b>Запуск:</b> {started}"
         "</blockquote>",
         parse_mode=ParseMode.HTML,
@@ -281,17 +281,17 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.effective_message.reply_text(
         "<b>TRD / SYSTEM STATUS</b>\n\n"
         "<blockquote>"
-        f"<b>Система:</b> работает<br>"
-        f"<b>Запуск:</b> {started}<br>"
-        f"<b>Администраторы:</b> {len(settings.admin_user_ids)}<br>"
-        f"<b>IDs:</b> {admins}<br><br>"
-        f"<b>MARKET:</b> каждые {settings.market_check_interval // 60} мин<br>"
-        f"<b>NEWS:</b> каждые {settings.news_check_interval // 60} мин<br>"
-        f"<b>Последняя NEWS:</b> {'есть' if state['last_news_text'] else 'нет'}<br>"
-        f"<b>Проверок MARKET:</b> {state['market_checks']}<br>"
-        f"<b>Проверок NEWS:</b> {state['news_checks']}<br>"
-        f"<b>Публикаций MARKET:</b> {state['market_published']}<br>"
-        f"<b>Публикаций PULSE:</b> {state['pulse_published']}<br>"
+        f"<b>Система:</b> работает\n"
+        f"<b>Запуск:</b> {started}\n"
+        f"<b>Администраторы:</b> {len(settings.admin_user_ids)}\n"
+        f"<b>IDs:</b> {admins}\n\n"
+        f"<b>MARKET:</b> каждые {settings.market_check_interval // 60} мин\n"
+        f"<b>NEWS:</b> каждые {settings.news_check_interval // 60} мин\n"
+        f"<b>Последняя NEWS:</b> {'есть' if state['last_news_text'] else 'нет'}\n"
+        f"<b>Проверок MARKET:</b> {state['market_checks']}\n"
+        f"<b>Проверок NEWS:</b> {state['news_checks']}\n"
+        f"<b>Публикаций MARKET:</b> {state['market_published']}\n"
+        f"<b>Публикаций PULSE:</b> {state['pulse_published']}\n"
         f"<b>Публикаций NEWS:</b> {state['news_published']}"
         "</blockquote>",
         parse_mode=ParseMode.HTML,
@@ -426,15 +426,15 @@ async def send_startup_notification(application: Application):
     text = (
         "<b>TRD PULSE</b>\n\n"
         "<blockquote>"
-        "<b>SYSTEM ONLINE</b><br><br>"
-        "<b>Статус:</b> работает<br>"
-        f"<b>Администраторов:</b> {len(settings.admin_user_ids)}<br>"
-        f"<b>MARKET:</b> каждые {settings.market_check_interval // 60} мин<br>"
-        f"<b>NEWS:</b> каждые {settings.news_check_interval // 60} мин<br>"
-        f"<b>Проверок MARKET:</b> {state['market_checks']}<br>"
-        f"<b>Проверок NEWS:</b> {state['news_checks']}<br>"
-        f"<b>Публикаций MARKET:</b> {state['market_published']}<br>"
-        f"<b>Публикаций PULSE:</b> {state['pulse_published']}<br>"
+        "<b>SYSTEM ONLINE</b>\n\n"
+        "<b>Статус:</b> работает\n"
+        f"<b>Администраторов:</b> {len(settings.admin_user_ids)}\n"
+        f"<b>MARKET:</b> каждые {settings.market_check_interval // 60} мин\n"
+        f"<b>NEWS:</b> каждые {settings.news_check_interval // 60} мин\n"
+        f"<b>Проверок MARKET:</b> {state['market_checks']}\n"
+        f"<b>Проверок NEWS:</b> {state['news_checks']}\n"
+        f"<b>Публикаций MARKET:</b> {state['market_published']}\n"
+        f"<b>Публикаций PULSE:</b> {state['pulse_published']}\n"
         f"<b>Публикаций NEWS:</b> {state['news_published']}"
         "</blockquote>"
     )
