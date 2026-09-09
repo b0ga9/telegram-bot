@@ -1,4 +1,4 @@
-"""TRD Visual Engine: deterministic cards for numeric MARKET posts."""
+"""TRD Visual Engine: clean, data-first MARKET cards."""
 from __future__ import annotations
 
 import hashlib
@@ -11,17 +11,16 @@ from PIL import Image, ImageDraw, ImageFont
 from formatting import format_money, format_pct, format_price, num
 from market_engine import MarketSignal
 
-W, H = 1536, 1024
-BG = (10, 12, 16)
-PANEL = (20, 23, 29)
-PANEL2 = (25, 29, 36)
-TEXT = (246, 248, 251)
-MUTED = (157, 166, 180)
-WHITE = (255, 255, 255)
-GREEN = (74, 218, 143)
-RED = (247, 94, 111)
-YELLOW = (244, 193, 75)
-LINE = (48, 54, 64)
+W, H = 1600, 1100
+BG = (8, 10, 14)
+SURFACE = (17, 20, 27)
+SURFACE_2 = (22, 26, 34)
+TEXT = (242, 244, 248)
+MUTED = (138, 145, 158)
+LINE = (45, 50, 61)
+UP = (86, 210, 151)
+DOWN = (235, 104, 118)
+NEUTRAL = (196, 166, 102)
 
 
 def _font(size: int, bold: bool = False):
@@ -38,21 +37,13 @@ def _font(size: int, bold: bool = False):
     return ImageFont.load_default()
 
 
-def _box(draw, xy, radius=24, fill=PANEL):
-    draw.rounded_rectangle(xy, radius=radius, fill=fill)
+def _card(draw, box, fill=SURFACE, radius=28):
+    draw.rounded_rectangle(box, radius=radius, fill=fill, outline=LINE, width=2)
 
 
-def _header(draw, section, title):
-    draw.text((72, 52), "TRD", font=_font(42, True), fill=WHITE)
-    draw.rounded_rectangle((205, 58, 430, 105), radius=14, fill=PANEL)
-    draw.text((228, 68), section, font=_font(20, True), fill=MUTED)
-    draw.text((72, 155), title, font=_font(58, True), fill=TEXT)
-
-
-def _footer(draw):
-    now = datetime.now(timezone.utc).strftime("%H:%M UTC")
-    draw.text((72, 970), "TRD • MARKET DATA", font=_font(17, True), fill=MUTED)
-    draw.text((1325, 970), now, font=_font(17), fill=MUTED)
+def _change_color(value):
+    value = num(value)
+    return UP if value > 0 else DOWN if value < 0 else MUTED
 
 
 def _save(image, output_dir, seed):
@@ -75,58 +66,75 @@ def build_market_card(
     signal = signal or MarketSignal(
         regime="NEUTRAL", score=0,
         breadth={"positive_pct": 0, "negative_pct": 0, "average_change": 0},
-        btc_metrics={"1h": None}, eth_metrics={"1h": None},
+        btc_metrics={"1h": None, "24h": None},
+        eth_metrics={"1h": None, "24h": None},
         btc_acceleration=0, triggers=[],
     )
 
-    change = num(market.get("market_cap_change_24h"))
-    if signal.regime == "BROAD_SELLOFF" or change <= -1:
-        state, accent, sub = "ДАВЛЕНИЕ", RED, "Рынок снижается"
-    elif signal.regime == "BROAD_RALLY" or change >= 1:
-        state, accent, sub = "РОСТ", GREEN, "Рынок растёт"
-    elif change > 0:
-        state, accent, sub = "ВОССТАНОВЛЕНИЕ", GREEN, "Появляется спрос"
-    else:
-        state, accent, sub = "СТАБИЛЬНО", YELLOW, "Сильного общего движения нет"
-
-    _header(draw, "MARKET", "Состояние рынка")
-
-    _box(draw, (72, 265, 1464, 440))
-    draw.text((112, 300), "СОСТОЯНИЕ", font=_font(21, True), fill=MUTED)
-    draw.text((112, 342), state, font=_font(58, True), fill=accent)
-    draw.text((112, 405), sub, font=_font(24), fill=TEXT)
-
     btc = market.get("btc") or {}
     eth = market.get("eth") or {}
-    cards = [
-        ("BTC", format_price(btc.get("current_price")), signal.btc_metrics.get("1h")),
-        ("ETH", format_price(eth.get("current_price")), signal.eth_metrics.get("1h")),
-        ("КАПИТАЛИЗАЦИЯ", format_money(market.get("market_cap")), change),
+    cap_change = market.get("market_cap_change_24h")
+    dominance = market.get("btc_dominance")
+    pos = num(signal.breadth.get("positive_pct"))
+    neg = num(signal.breadth.get("negative_pct"))
+    avg = signal.breadth.get("average_change")
+
+    # Minimal editorial header.
+    draw.text((80, 70), "TRD", font=_font(34, True), fill=TEXT)
+    draw.text((80, 118), "MARKET SNAPSHOT", font=_font(18, True), fill=MUTED)
+    draw.text((80, 175), "Crypto market", font=_font(60, True), fill=TEXT)
+
+    now = datetime.now(timezone.utc).strftime("%H:%M UTC")
+    draw.text((1330, 86), now, font=_font(18), fill=MUTED)
+
+    # Hero state card.
+    state_change = num(cap_change)
+    if state_change >= 1:
+        state, accent, descriptor = "RISK ON", UP, "Broad market demand is improving"
+    elif state_change <= -1:
+        state, accent, descriptor = "RISK OFF", DOWN, "Selling pressure dominates the market"
+    else:
+        state, accent, descriptor = "BALANCED", NEUTRAL, "No decisive broad market impulse"
+
+    _card(draw, (80, 285, 1520, 470), fill=SURFACE_2)
+    draw.text((120, 325), "MARKET REGIME", font=_font(17, True), fill=MUTED)
+    draw.text((120, 370), state, font=_font(48, True), fill=accent)
+    draw.text((610, 385), descriptor, font=_font(24), fill=TEXT)
+    draw.text((120, 435), signal.regime.replace("_", " "), font=_font(18, True), fill=MUTED)
+
+    # Four equal metric cards. No text MARKET caption is needed in Telegram anymore.
+    metrics = [
+        ("BTC", format_price(btc.get("current_price")), "1H", signal.btc_metrics.get("1h")),
+        ("ETH", format_price(eth.get("current_price")), "1H", signal.eth_metrics.get("1h")),
+        ("TOTAL CAP", format_money(market.get("market_cap")), "24H", cap_change),
+        ("BTC DOM", format_pct(dominance), "BREADTH", avg),
     ]
+    gap, card_w = 24, 348
+    y1, y2 = 510, 775
+    x = 80
+    for label, value, period, change in metrics:
+        _card(draw, (x, y1, x + card_w, y2))
+        draw.text((x + 32, y1 + 32), label, font=_font(17, True), fill=MUTED)
+        draw.text((x + 32, y1 + 94), value, font=_font(37, True), fill=TEXT)
+        draw.text((x + 32, y1 + 170), period, font=_font(15, True), fill=MUTED)
+        draw.text((x + 32, y1 + 202), format_pct(change), font=_font(27, True), fill=_change_color(change))
+        x += card_w + gap
 
-    x = 72
-    for label, value, pct in cards:
-        _box(draw, (x, 475, x + 430, 770), radius=22, fill=PANEL2)
-        draw.text((108, 512), label, font=_font(21, True), fill=MUTED)
-        draw.text((108, 575), value, font=_font(39, True), fill=TEXT)
-        value_num = num(pct)
-        color = GREEN if value_num > 0 else RED if value_num < 0 else MUTED
-        draw.text((108, 650), f"1ч  {format_pct(pct)}", font=_font(29, True), fill=color)
-        x += 455
+    # Breadth card.
+    _card(draw, (80, 815, 1520, 995), fill=SURFACE_2)
+    draw.text((120, 855), "MARKET BREADTH", font=_font(17, True), fill=MUTED)
+    draw.text((120, 900), f"{pos:.0f}%", font=_font(42, True), fill=UP)
+    draw.text((280, 910), "ADVANCING", font=_font(17, True), fill=MUTED)
+    draw.text((610, 900), f"{neg:.0f}%", font=_font(42, True), fill=DOWN)
+    draw.text((770, 910), "DECLINING", font=_font(17, True), fill=MUTED)
 
-    pos = signal.breadth.get("positive_pct", 0)
-    neg = signal.breadth.get("negative_pct", 0)
-    draw.text((72, 820), "ШИРИНА РЫНКА", font=_font(20, True), fill=MUTED)
-    draw.text((72, 855), f"РАСТУТ  {pos:.0f}%", font=_font(27, True), fill=GREEN)
-    draw.text((330, 855), f"СНИЖАЮТСЯ  {neg:.0f}%", font=_font(27, True), fill=RED)
-    draw.rounded_rectangle((72, 905, 1464, 928), radius=10, fill=LINE)
-    if pos + neg > 0:
-        split = 72 + 1392 * (pos / (pos + neg))
-        draw.rounded_rectangle((72, 905, split, 928), radius=10, fill=GREEN)
+    bar_x1, bar_x2 = 1120, 1480
+    draw.rounded_rectangle((bar_x1, 880, bar_x2, 910), radius=15, fill=LINE)
+    total = pos + neg
+    if total > 0:
+        split = int(bar_x1 + (bar_x2 - bar_x1) * pos / total)
+        draw.rounded_rectangle((bar_x1, 880, split, 910), radius=15, fill=UP)
+    draw.text((1120, 930), "ADVANCE / DECLINE", font=_font(14, True), fill=MUTED)
 
-    _footer(draw)
-    return _save(
-        image,
-        output_dir,
-        f"{change}|{signal.regime}|{pos}|{neg}|{market.get('market_cap')}",
-    )
+    draw.text((80, 1040), "TRD PULSE", font=_font(16, True), fill=MUTED)
+    return _save(image, output_dir, f"{cap_change}|{signal.regime}|{pos}|{neg}|{market.get('market_cap')}")

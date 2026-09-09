@@ -5,12 +5,12 @@ import logging
 from datetime import datetime, timezone
 
 import httpx
-from telegram import Update
+from telegram import Update, ReplyKeyboardMarkup, KeyboardButton
 from telegram.constants import ParseMode
-from telegram.ext import Application, CommandHandler, ContextTypes
+from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
 
 from config import Settings, load_settings
-from formatting import format_money, format_pct, format_price, telegram_html
+from formatting import telegram_html
 from market_engine import MarketEngine, MarketSignal, should_publish_market, should_publish_pulse
 from news_engine import NewsResult, fetch_important_news, format_news_post
 from pulse_engine import format_pulse_post, generate_pulse
@@ -32,7 +32,7 @@ async def admin_only(update: Update, settings: Settings) -> bool:
     if is_admin(update, settings):
         return True
     if update.effective_message:
-        await update.effective_message.reply_text("⛔ Команда доступна только администратору.")
+        await update.effective_message.reply_text("Команда доступна только администратору.")
     return False
 
 
@@ -60,14 +60,14 @@ def get_client(application: Application) -> httpx.AsyncClient:
     return application.bot_data["http_client"]
 
 
-async def send_post(bot, chat_id, text: str, image_path=None):
-    html_text = telegram_html(text)
-    if image_path and len(html_text) <= 1024:
+async def send_post(bot, chat_id, text: str, image_path=None, reply_markup=None):
+    if image_path and len(text) <= 1024:
         await bot.send_photo(
             chat_id=chat_id,
             photo=image_path,
-            caption=html_text,
+            caption=text,
             parse_mode=ParseMode.HTML,
+            reply_markup=reply_markup,
         )
         return
 
@@ -76,30 +76,16 @@ async def send_post(bot, chat_id, text: str, image_path=None):
 
     await bot.send_message(
         chat_id=chat_id,
-        text=html_text,
+        text=text,
         parse_mode=ParseMode.HTML,
         disable_web_page_preview=True,
+        reply_markup=reply_markup,
     )
 
 
 def format_market_post(market: dict, signal: MarketSignal) -> str:
-    btc = market.get("btc") or {}
-    eth = market.get("eth") or {}
-    return "\n".join([
-        "📊 **TRD MARKET**",
-        "",
-        f"₿ BTC: **{format_price(btc.get('current_price'))}**  {format_pct(signal.btc_metrics.get('1h'))} за 1ч",
-        f"Ξ ETH: **{format_price(eth.get('current_price'))}**  {format_pct(signal.eth_metrics.get('1h'))} за 1ч",
-        "",
-        f"🌐 Market Cap: **{format_money(market.get('market_cap'))}**",
-        f"24ч: **{format_pct(market.get('market_cap_change_24h'))}**",
-        f"₿ BTC Dominance: **{format_pct(market.get('btc_dominance'))}**",
-        "",
-        f"🟢 Растут: **{signal.breadth['positive_pct']:.0f}%**",
-        f"🔴 Снижаются: **{signal.breadth['negative_pct']:.0f}%**",
-        "",
-        f"Режим: **{signal.regime}**",
-    ])
+    # MARKET is visual-first: the card itself is the post.
+    return ""
 
 
 async def collect_market(application: Application):
@@ -115,19 +101,59 @@ async def collect_market(application: Application):
     return market, coins, signal
 
 
+def main_menu() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        [
+            [KeyboardButton("MARKET"), KeyboardButton("PULSE")],
+            [KeyboardButton("NEWS"), KeyboardButton("STATUS")],
+        ],
+        resize_keyboard=True,
+        input_field_placeholder="Выбери действие",
+    )
+
+
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     settings = get_settings(context.application)
     if not await admin_only(update, settings):
         return
 
     await update.effective_message.reply_text(
-        "TRD Pulse готов.\n\n"
-        "Команды:\n"
-        "/news — найти важную новость\n"
-        "/pulse — текущий рыночный контекст\n"
-        "/market — актуальные цифры рынка\n"
-        "/status — состояние системы"
+        "<b>TRD PULSE / CONTROL</b>\n\n"
+        "<blockquote>Управление системой и ручной запуск модулей.<br><br>"
+        "<b>MARKET</b> — данные в визуальных карточках<br>"
+        "<b>PULSE</b> — краткий рыночный контекст<br>"
+        "<b>NEWS</b> — только важные события<br>"
+        "<b>STATUS</b> — состояние системы</blockquote>",
+        parse_mode=ParseMode.HTML,
+        reply_markup=main_menu(),
     )
+
+
+async def menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    settings = get_settings(context.application)
+    if not await admin_only(update, settings):
+        return
+
+    text = (update.effective_message.text or "").strip()
+    mapping = {
+        "MARKET": "/market",
+        "PULSE": "/pulse",
+        "NEWS": "/news",
+        "STATUS": "/status",
+    }
+    command = mapping.get(text)
+    if not command:
+        return
+
+    # Route button actions to the same command handlers.
+    if command == "/market":
+        await market_command(update, context)
+    elif command == "/pulse":
+        await pulse_command(update, context)
+    elif command == "/news":
+        await news_command(update, context)
+    elif command == "/status":
+        await status_command(update, context)
 
 
 async def market_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -143,7 +169,7 @@ async def market_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await send_post(context.bot, update.effective_chat.id, format_market_post(market, signal), image_path)
     except Exception:
         logger.exception("Manual MARKET failed")
-        await update.effective_message.reply_text("❌ Не удалось получить данные рынка.")
+        await update.effective_message.reply_text("Не удалось получить данные рынка.")
 
 
 async def news_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -159,7 +185,7 @@ async def news_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             model=settings.openai_model,
         )
         if news.importance < 7 or news.key.upper() == "NONE":
-            await update.effective_message.reply_text("📰 Сейчас нет новости, которая проходит фильтр важности.")
+            await update.effective_message.reply_text("Сейчас нет новости, которая проходит фильтр важности.")
             return
 
         text = format_news_post(news)
@@ -170,7 +196,7 @@ async def news_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await send_post(context.bot, update.effective_chat.id, text)
     except Exception:
         logger.exception("Manual NEWS failed")
-        await update.effective_message.reply_text("❌ Не удалось получить важную новость.")
+        await update.effective_message.reply_text("Не удалось получить важную новость.")
 
 
 async def pulse_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -197,7 +223,7 @@ async def pulse_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
     except Exception:
         logger.exception("Manual PULSE failed")
-        await update.effective_message.reply_text("❌ Не удалось сформировать Pulse.")
+        await update.effective_message.reply_text("Не удалось сформировать Pulse.")
 
 
 async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -208,13 +234,15 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     state = get_state(context.application)
     started = state["monitor_started_at"].strftime("%Y-%m-%d %H:%M UTC")
     await update.effective_message.reply_text(
-        "🟢 **TRD STATUS**\n\n"
-        f"Монитор: работает\n"
-        f"Запуск: {started}\n"
-        f"MARKET interval: {settings.market_check_interval // 60} мин\n"
-        f"NEWS interval: {settings.news_check_interval // 60} мин\n"
-        f"Последняя NEWS: {'есть' if state['last_news_text'] else 'нет'}",
-        parse_mode=ParseMode.MARKDOWN,
+        "<b>TRD / SYSTEM STATUS</b>\n\n"
+        "<blockquote>"
+        f"<b>Монитор:</b> работает<br>"
+        f"<b>Запуск:</b> {started}<br>"
+        f"<b>MARKET:</b> каждые {settings.market_check_interval // 60} мин<br>"
+        f"<b>NEWS:</b> каждые {settings.news_check_interval // 60} мин<br>"
+        f"<b>Последняя NEWS:</b> {'есть' if state['last_news_text'] else 'нет'}"
+        "</blockquote>",
+        parse_mode=ParseMode.HTML,
     )
 
 
@@ -357,6 +385,7 @@ def main():
     application.add_handler(CommandHandler("news", news_command))
     application.add_handler(CommandHandler("pulse", pulse_command))
     application.add_handler(CommandHandler("status", status_command))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, menu_handler))
 
     logger.info("Starting TRD Pulse")
     application.run_polling(allowed_updates=Update.ALL_TYPES)

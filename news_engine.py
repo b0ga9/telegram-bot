@@ -6,6 +6,8 @@ from dataclasses import dataclass
 
 import httpx
 
+from formatting import domain_label, escape, link, post_html
+
 
 @dataclass
 class NewsResult:
@@ -29,6 +31,14 @@ NEWS_PROMPT = """
 которое может заметно повлиять на мировые рынки, Bitcoin, Ethereum
 или другие риск-активы.
 
+Стиль канала:
+- коротко;
+- конкретно;
+- без воды;
+- заголовок максимум 8 слов;
+- summary максимум 2 коротких предложения;
+- why_it_matters максимум 1 короткое предложение.
+
 Приоритет:
 1. ФРС / ЕЦБ / ставки
 2. инфляция / занятость / макроданные
@@ -40,9 +50,9 @@ NEWS_PROMPT = """
 Не публикуй:
 - мелкие новости;
 - слухи;
-- рекламные материалы;
-- обычные движения цены без важной причины;
-- повтор уже известного события.
+- рекламу;
+- повтор известного события;
+- обычное движение цены без важной причины.
 
 Проверь событие минимум по 2 независимым источникам.
 Не выдумывай факты и URL.
@@ -52,8 +62,8 @@ NEWS_PROMPT = """
   "importance": 0,
   "key": "короткий стабильный идентификатор события или NONE",
   "title": "очень короткий заголовок",
-  "summary": "1-2 коротких предложения: что произошло",
-  "why_it_matters": "1 короткое предложение: почему это важно",
+  "summary": "1-2 коротких предложения",
+  "why_it_matters": "1 короткое предложение",
   "sources": ["https://...", "https://..."]
 }
 
@@ -62,31 +72,21 @@ importance: 0-10.
 """
 
 
-async def fetch_important_news(
-    client: httpx.AsyncClient,
-    *,
-    api_url: str,
-    api_key: str,
-    model: str,
-) -> NewsResult:
-    payload = {
-        "model": model,
-        "input": NEWS_PROMPT,
-        "tools": [{"type": "web_search"}],
-        "max_output_tokens": 900,
-    }
+async def fetch_important_news(client: httpx.AsyncClient, *, api_url: str, api_key: str, model: str) -> NewsResult:
     response = await client.post(
         api_url,
-        headers={
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
+        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+        json={
+            "model": model,
+            "input": NEWS_PROMPT,
+            "tools": [{"type": "web_search"}],
+            "max_output_tokens": 900,
         },
-        json=payload,
     )
     response.raise_for_status()
     data = response.json()
 
-    chunks: list[str] = []
+    chunks = []
     for item in data.get("output", []):
         if item.get("type") == "message":
             for content in item.get("content", []):
@@ -111,12 +111,15 @@ async def fetch_important_news(
 
 
 def format_news_post(news: NewsResult) -> str:
-    lines = ["📰 **TRD NEWS**", "", f"**{news.title}**", ""]
-    if news.summary:
-        lines.append(news.summary)
+    body = [
+        f"<b>Главное</b><br>{escape(news.summary)}",
+    ]
     if news.why_it_matters:
-        lines.extend(["", f"⚡ **Почему важно:** {news.why_it_matters}"])
+        body.append(f"<b>Почему важно</b><br><i>{escape(news.why_it_matters)}</i>")
+
+    footer = ""
     if news.sources:
-        lines.extend(["", "Источники:"])
-        lines.extend([f"• {source}" for source in news.sources])
-    return "\n".join(lines)
+        links = " • ".join(link(url, domain_label(url)) for url in news.sources[:3])
+        footer = links
+
+    return post_html("NEWS", news.title, "<br><br>".join(body), footer)

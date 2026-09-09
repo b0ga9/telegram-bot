@@ -4,7 +4,7 @@ import json
 
 import httpx
 
-from formatting import format_money, format_pct, format_price
+from formatting import escape, format_money, format_pct, format_price, post_html
 from market_engine import MarketSignal
 
 
@@ -54,22 +54,11 @@ Score: {signal.score}
 """
 
 
-async def generate_pulse(
-    client: httpx.AsyncClient,
-    *,
-    api_url: str,
-    api_key: str,
-    model: str,
-    market: dict,
-    signal: MarketSignal,
-    recent_news: str,
-) -> dict[str, str]:
+async def generate_pulse(client: httpx.AsyncClient, *, api_url: str, api_key: str, model: str,
+                         market: dict, signal: MarketSignal, recent_news: str) -> dict[str, str]:
     response = await client.post(
         api_url,
-        headers={
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-        },
+        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
         json={
             "model": model,
             "input": build_pulse_context(market, signal, recent_news),
@@ -99,14 +88,11 @@ async def generate_pulse(
 
 
 def format_pulse_post(pulse: dict[str, str], signal: MarketSignal) -> str:
-    return "\n".join([
-        "⚡ **TRD PULSE**",
-        "",
-        f"**{pulse.get('headline') or 'Движение рынка'}**",
-        "",
-        pulse.get("main") or "Рынок показывает заметное движение.",
-        "",
-        f"📊 Растут: {signal.breadth['positive_pct']:.0f}% • "
-        f"Снижаются: {signal.breadth['negative_pct']:.0f}%",
-        f"🎯 **Фокус:** {pulse.get('focus') or signal.regime}",
-    ])
+    body = (
+        f"<b>Сигнал</b><br>{escape(pulse.get('main') or 'Рынок показывает заметное движение.')}<br><br>"
+        f"<b>Ширина рынка</b><br>"
+        f"<u>{signal.breadth['positive_pct']:.0f}% растут</u> • "
+        f"<u>{signal.breadth['negative_pct']:.0f}% снижаются</u><br><br>"
+        f"<b>Фокус</b><br><i>{escape(pulse.get('focus') or signal.regime)}</i>"
+    )
+    return post_html("PULSE", pulse.get("headline") or "Движение рынка", body)
