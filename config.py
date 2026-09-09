@@ -38,11 +38,21 @@ def _required(name: str) -> str:
     return value
 
 
+def _optional(name: str, default: str) -> str:
+    value = (os.getenv(name) or "").strip()
+    return value or default
+
+
 def _admin_ids() -> tuple[int, ...]:
+    # Primary secret: ADMIN_USER_IDS. Keep ADMIN_USER_ID as backward-compatible fallback.
     raw = (os.getenv("ADMIN_USER_IDS") or "").strip()
     if not raw:
-        # Backward compatibility with the old single-admin secret.
-        raw = _required("ADMIN_USER_ID")
+        raw = (os.getenv("ADMIN_USER_ID") or "").strip()
+    if not raw:
+        raise RuntimeError(
+            "Не задан администратор. Создай GitHub Secret ADMIN_USER_IDS "
+            "(например: 123456789). ADMIN_USER_ID поддерживается для совместимости."
+        )
 
     ids: list[int] = []
     for value in raw.split(","):
@@ -65,7 +75,7 @@ def load_settings() -> Settings:
         telegram_channel_id=_required("TELEGRAM_CHANNEL_ID"),
         admin_user_ids=_admin_ids(),
         openai_api_key=_required("OPENAI_API_KEY"),
-        openai_model=(os.getenv("OPENAI_MODEL") or "gpt-5.6-luna").strip(),
+        openai_model=_optional("OPENAI_MODEL", "gpt-5.6-luna"),
         visual_enabled=_bool("TRD_VISUAL_ENABLED"),
         visual_dir=Path(os.getenv("TRD_VISUAL_DIR") or "/tmp/trd_visuals"),
         market_check_interval=int(os.getenv("MARKET_CHECK_INTERVAL") or 600),

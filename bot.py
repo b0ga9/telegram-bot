@@ -224,9 +224,14 @@ async def news_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         state["last_news_key"] = news.key
         state["last_news_hash"] = news.fingerprint
         await send_post(context.bot, update.effective_chat.id, text)
-    except Exception:
+    except Exception as exc:
         logger.exception("Manual NEWS failed")
-        await update.effective_message.reply_text("Не удалось получить важную новость.")
+        await update.effective_message.reply_text(
+            "Не удалось получить важную новость.\n\n"
+            f"Ошибка: <code>{escape(type(exc).__name__)}</code>\n"
+            "Подробности смотри в GitHub Actions → Run logs.",
+            parse_mode=ParseMode.HTML,
+        )
 
 
 async def pulse_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -251,9 +256,14 @@ async def pulse_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             update.effective_chat.id,
             format_pulse_post(pulse, signal),
         )
-    except Exception:
+    except Exception as exc:
         logger.exception("Manual PULSE failed")
-        await update.effective_message.reply_text("Не удалось сформировать Pulse.")
+        await update.effective_message.reply_text(
+            "Не удалось сформировать Pulse.\n\n"
+            f"Ошибка: <code>{escape(type(exc).__name__)}</code>\n"
+            "Подробности смотри в GitHub Actions → Run logs.",
+            parse_mode=ParseMode.HTML,
+        )
 
 
 async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -307,23 +317,27 @@ async def automatic_market_check(application: Application):
         logger.info("Automatic MARKET published")
 
     if should_publish_pulse(signal) and now - state["last_pulse_at"] >= settings.pulse_cooldown:
-        pulse = await generate_pulse(
-            get_client(application),
-            api_url=settings.openai_api,
-            api_key=settings.openai_api_key,
-            model=settings.openai_model,
-            market=market,
-            signal=signal,
-            recent_news=state["last_news_text"],
-        )
-        await send_post(
-            application.bot,
-            settings.telegram_channel_id,
-            format_pulse_post(pulse, signal),
-        )
-        state["last_pulse_at"] = now
-        state["pulse_published"] += 1
-        logger.info("Automatic PULSE published")
+        try:
+            pulse = await generate_pulse(
+                get_client(application),
+                api_url=settings.openai_api,
+                api_key=settings.openai_api_key,
+                model=settings.openai_model,
+                market=market,
+                signal=signal,
+                recent_news=state["last_news_text"],
+            )
+            await send_post(
+                application.bot,
+                settings.telegram_channel_id,
+                format_pulse_post(pulse, signal),
+            )
+            state["last_pulse_at"] = now
+            state["pulse_published"] += 1
+            logger.info("Automatic PULSE published")
+        except Exception:
+            # Ошибка PULSE не должна блокировать последующие NEWS/MARKET проверки.
+            logger.exception("Automatic PULSE failed; continuing monitor loop")
 
 
 async def automatic_news_check(application: Application):
@@ -335,27 +349,31 @@ async def automatic_news_check(application: Application):
         return
 
     state["news_checks"] += 1
-    news = await fetch_important_news(
-        get_client(application),
-        api_url=settings.openai_api,
-        api_key=settings.openai_api_key,
-        model=settings.openai_model,
-    )
-    state["last_news_at"] = now
+    try:
+        news = await fetch_important_news(
+            get_client(application),
+            api_url=settings.openai_api,
+            api_key=settings.openai_api_key,
+            model=settings.openai_model,
+        )
+        state["last_news_at"] = now
 
-    if news.importance < 9 or news.key.upper() == "NONE":
-        return
-    if news.key == state["last_news_key"] or news.fingerprint == state["last_news_hash"]:
-        logger.info("Automatic NEWS skipped as duplicate")
-        return
+        if news.importance < 9 or news.key.upper() == "NONE":
+            return
+        if news.key == state["last_news_key"] or news.fingerprint == state["last_news_hash"]:
+            logger.info("Automatic NEWS skipped as duplicate")
+            return
 
-    text = format_news_post(news)
-    await send_post(application.bot, settings.telegram_channel_id, text)
-    state["last_news_text"] = text
-    state["last_news_key"] = news.key
-    state["last_news_hash"] = news.fingerprint
-    state["news_published"] += 1
-    logger.info("Automatic NEWS published")
+        text = format_news_post(news)
+        await send_post(application.bot, settings.telegram_channel_id, text)
+        state["last_news_text"] = text
+        state["last_news_key"] = news.key
+        state["last_news_hash"] = news.fingerprint
+        state["news_published"] += 1
+        logger.info("Automatic NEWS published")
+    except Exception:
+        state["last_news_at"] = now
+        logger.exception("Automatic NEWS failed; continuing monitor loop")
 
 
 async def monitor_loop(application: Application):
@@ -438,6 +456,7 @@ async def post_init(application: Application):
     application.bot_data["http_client"] = httpx.AsyncClient(timeout=httpx.Timeout(30.0))
     get_state(application)
     await configure_commands(application)
+    await preflight_checks(application, settings)
     application.bot_data["monitor_task"] = asyncio.create_task(monitor_loop(application))
     logger.info("TRD Pulse initialized")
     await send_startup_notification(application)
@@ -457,6 +476,55 @@ async def post_shutdown(application: Application):
         await client.aclose()
 
     logger.info("TRD Pulse stopped")
+
+
+async def preflight_checks(application: Application, settings: Settings):
+    """Проверяет Telegram-конфигурацию до запуска фонового мониторинга."""
+    logger.info("=== TRD PULSE PREFLIGHT ===")
+    logger.info("Admin IDs: %s", ", ".join(map(str, settings.admin_user_ids)))
+    logger.info("OpenAI model: %s", settings.openai_model)
+    logger.info("Channel ID configured: yes")
+    logger.info("OpenAI key configured: yes")
+
+    me = await application.bot.get_me()
+    logger.info("Telegram OK: @%s (id=%s)", me.username, me.id)
+
+    # Реально проверяем OpenAI key + model через Responses API.
+    # Запрос минимальный, чтобы ошибка была обнаружена до старта мониторинга.
+    try:
+        response = await get_client(application).post(
+            settings.openai_api,
+            headers={
+                "Authorization": f"Bearer {settings.openai_api_key}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": settings.openai_model,
+                "input": "Reply with exactly: OK",
+                "max_output_tokens": 8,
+            },
+        )
+        if response.status_code >= 400:
+            detail = response.text[:500].replace("\n", " ")
+            raise RuntimeError(f"HTTP {response.status_code}: {detail}")
+        logger.info("OpenAI OK: model=%s", settings.openai_model)
+    except Exception as exc:
+        raise RuntimeError(
+            "OpenAI preflight failed. Проверь OPENAI_API_KEY и OPENAI_MODEL. "
+            f"Причина: {type(exc).__name__}: {exc}"
+        ) from exc
+
+    # Проверяем, что бот действительно может обратиться к каналу.
+    # Не отправляем тестовое сообщение, чтобы не засорять канал.
+    try:
+        chat = await application.bot.get_chat(settings.telegram_channel_id)
+        logger.info("Telegram channel OK: %s (%s)", chat.title or chat.username or chat.id, chat.id)
+    except Exception as exc:
+        raise RuntimeError(
+            "Не удалось получить Telegram_CHANNEL. Проверь TELEGRAM_CHANNEL_ID "
+            "и права бота в канале. "
+            f"Причина: {type(exc).__name__}: {exc}"
+        ) from exc
 
 
 def main():
