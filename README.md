@@ -1,74 +1,13 @@
-# TRD Pulse
+# TRD PULSE v11 — OpenAI Structured Outputs
 
-Новая минимальная архитектура проекта.
+This patch changes only `news_engine.py` and `pulse_engine.py`.
 
-## Контент
+- Uses Responses API `text.format` with `json_schema` and `strict: true`.
+- Keeps NEWS web search.
+- Adds explicit handling for refusal / empty / incomplete output.
+- Sets `store: false` for these Responses API calls.
+- Removes manual JSON-format instructions and code-fence stripping.
+- Does not change bot.py, SQLite, GitHub Actions, or market scoring.
 
-- **NEWS** — важное событие: факт + смысл.
-- **PULSE** — короткая интерпретация сильного рыночного движения.
-- **MARKET** — цифры и рыночные данные, подтверждающие контекст.
-
-Удалено из архитектуры:
-
-- LIVE BOARD
-- отдельный PRICES-раздел
-- `/publish`
-- preview/editor workflow
-- закреплённый постоянно обновляемый пост
-
-## Структура
-
-```text
-bot.py              # Telegram + lifecycle + мониторинг
-config.py           # настройки окружения
-market_engine.py    # данные, история цен, breadth, regime, score
-news_engine.py      # поиск и фильтрация важных новостей
-pulse_engine.py     # короткая интерпретация market signal
-visual_engine.py    # только MARKET-карточки
-formatting.py       # форматирование
-```
-
-## Установка
-
-```bash
-python -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-```
-
-Скопируй `env.example` в `.env` (или задай переменные окружения в hosting/CI).
-
-## Команды
-
-- `/start`
-- `/market`
-- `/news`
-- `/pulse`
-- `/status`
-
-## Важный принцип
-
-`MARKET ENGINE` — центр системы.
-
-Он получает данные, хранит историю, считает изменения, breadth,
-regime и score.
-
-- MARKET использует числа напрямую.
-- PULSE получает сигнал рынка.
-- NEWS работает отдельно и не выдумывает рыночные факты.
-
-## Административное ядро
-
-При запуске бот автоматически:
-- регистрирует `/start`, `/market`, `/pulse`, `/news`, `/status` через Telegram Bot API;
-- отправляет `SYSTEM ONLINE` всем администраторам, которые уже запускали бота;
-- поддерживает несколько администраторов через `ADMIN_USER_IDS`.
-
-Для обратной совместимости остаётся поддержка старого `ADMIN_USER_ID`.
-
-## Что стоит сделать следующим этапом
-
-1. Добавить SQLite для дедупликации и cooldown после рестарта.
-2. Добавить unit-тесты для market scoring.
-3. Настроить нормальный постоянный деплой (VPS/Docker), а не бесконечный polling в GitHub Actions.
-4. Проверить конкретный формат structured output OpenAI под используемый аккаунт/API и при необходимости заменить текущий JSON parsing на schema response format.
+Copy the two files from `news_patch/` into the project root, replacing the existing files.
+Then run the existing unit-test workflow.
