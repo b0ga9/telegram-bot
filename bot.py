@@ -2,6 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import hashlib
+import json
+import time
+import re
 from datetime import datetime, timezone
 from html import escape
 
@@ -24,6 +28,21 @@ logging.basicConfig(
     level=logging.INFO,
 )
 logger = logging.getLogger("trd-pulse")
+
+
+def event_key_for_signal(kind: str, signal: MarketSignal) -> str:
+    """Stable short-window key for deduplicating repeated market signals."""
+    breadth = getattr(signal, "breadth", {}) or {}
+    payload = {
+        "kind": kind,
+        "bucket": int(time.time() // 3600),
+        "regime": str(getattr(signal, "regime", "")),
+        "score": getattr(signal, "score", None),
+        "positive_pct": breadth.get("positive_pct"),
+        "negative_pct": breadth.get("negative_pct"),
+    }
+    raw = json.dumps(payload, sort_keys=True, ensure_ascii=False, default=str)
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
 def is_admin(update: Update, settings: Settings) -> bool:
@@ -79,11 +98,10 @@ def get_client(application: Application) -> httpx.AsyncClient:
     return application.bot_data["http_client"]
 
 
-def get_storage(application: Application) -> SQLiteStorage:
-    return application.bot_data["storage"]
-
-
 async def send_post(bot, chat_id, text: str, image_path=None, reply_markup=None):
+    # Telegram HTML does not support \n. Engine formatters may produce it,
+    # so normalize line-break tags at the final sending boundary.
+    text = re.sub(r"<br\s*/?>", "\n", text, flags=re.IGNORECASE)
     if image_path and len(text) <= 1024:
         await bot.send_photo(
             chat_id=chat_id,
@@ -151,12 +169,12 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.effective_message.reply_text(
         "<b>TRD PULSE</b>\n\n"
         "<blockquote>"
-        "<b>ПАНЕЛЬ УПРАВЛЕНИЯ</b><br><br>"
-        "<b>MARKET</b> — текущее состояние рынка<br>"
-        "<b>PULSE</b> — последний рыночный сигнал<br>"
-        "<b>NEWS</b> — важное событие<br>"
-        "<b>STATUS</b> — состояние системы<br><br>"
-        f"<b>Мониторинг:</b> активен<br>"
+        "<b>ПАНЕЛЬ УПРАВЛЕНИЯ</b>\n\n"
+        "<b>MARKET</b> — текущее состояние рынка\n"
+        "<b>PULSE</b> — последний рыночный сигнал\n"
+        "<b>NEWS</b> — важное событие\n"
+        "<b>STATUS</b> — состояние системы\n\n"
+        f"<b>Мониторинг:</b> активен\n"
         f"<b>Запуск:</b> {started}"
         "</blockquote>",
         parse_mode=ParseMode.HTML,
@@ -277,30 +295,23 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     state = get_state(context.application)
-    stats = get_storage(context.application).get_stats()
     started = state["monitor_started_at"].strftime("%Y-%m-%d %H:%M UTC")
     admins = ", ".join(str(user_id) for user_id in settings.admin_user_ids)
-
-    def fmt_time(value):
-        return datetime.fromtimestamp(value, tz=timezone.utc).strftime("%H:%M UTC") if value else "нет"
-
     await update.effective_message.reply_text(
         "<b>TRD / SYSTEM STATUS</b>\n\n"
         "<blockquote>"
-        f"<b>Система:</b> работает<br>"
-        f"<b>Запуск:</b> {started}<br>"
-        f"<b>Администраторы:</b> {len(settings.admin_user_ids)}<br>"
-        f"<b>IDs:</b> {admins}<br><br>"
-        f"<b>MARKET:</b> каждые {settings.market_check_interval // 60} мин<br>"
-        f"<b>NEWS:</b> каждые {settings.news_check_interval // 60} мин<br>"
-        f"<b>Последняя NEWS:</b> {'есть' if state['last_news_text'] else 'нет'}<br>"
-        f"<b>Последняя проверка MARKET:</b> {fmt_time(stats['last_market_check_at'])}<br>"
-        f"<b>Последняя проверка NEWS:</b> {fmt_time(stats['last_news_check_at'])}<br>"
-        f"<b>Проверок MARKET:</b> {stats['market_checks']}<br>"
-        f"<b>Проверок NEWS:</b> {stats['news_checks']}<br>"
-        f"<b>Публикаций MARKET:</b> {stats['market_published']}<br>"
-        f"<b>Публикаций PULSE:</b> {stats['pulse_published']}<br>"
-        f"<b>Публикаций NEWS:</b> {stats['news_published']}"
+        f"<b>Система:</b> работает\n"
+        f"<b>Запуск:</b> {started}\n"
+        f"<b>Администраторы:</b> {len(settings.admin_user_ids)}\n"
+        f"<b>IDs:</b> {admins}\n\n"
+        f"<b>MARKET:</b> каждые {settings.market_check_interval // 60} мин\n"
+        f"<b>NEWS:</b> каждые {settings.news_check_interval // 60} мин\n"
+        f"<b>Последняя NEWS:</b> {'есть' if state['last_news_text'] else 'нет'}\n"
+        f"<b>Проверок MARKET:</b> {state['market_checks']}\n"
+        f"<b>Проверок NEWS:</b> {state['news_checks']}\n"
+        f"<b>Публикаций MARKET:</b> {state['market_published']}\n"
+        f"<b>Публикаций PULSE:</b> {state['pulse_published']}\n"
+        f"<b>Публикаций NEWS:</b> {state['news_published']}"
         "</blockquote>",
         parse_mode=ParseMode.HTML,
     )
@@ -311,11 +322,16 @@ async def automatic_market_check(application: Application):
     state = get_state(application)
 
     state["market_checks"] += 1
-    get_storage(application).increment_stat("market_checks")
     market, _, signal = await collect_market(application)
     now = asyncio.get_running_loop().time()
 
-    if should_publish_market(signal) and now - state["last_market_at"] >= settings.market_cooldown:
+    market_event_key = event_key_for_signal("MARKET", signal)
+    storage = application.bot_data["storage"]
+    if (
+        should_publish_market(signal)
+        and not storage.is_duplicate("MARKET", market_event_key)
+        and not storage.cooldown_active("MARKET", settings.market_cooldown)
+    ):
         image_path = None
         if settings.visual_enabled:
             image_path = build_market_card(market, signal, settings.visual_dir)
@@ -327,10 +343,15 @@ async def automatic_market_check(application: Application):
         )
         state["last_market_at"] = now
         state["market_published"] += 1
-        get_storage(application).increment_stat("market_published")
+        storage.mark_published("MARKET", market_event_key)
         logger.info("Automatic MARKET published")
 
-    if should_publish_pulse(signal) and now - state["last_pulse_at"] >= settings.pulse_cooldown:
+    pulse_event_key = event_key_for_signal("PULSE", signal)
+    if (
+        should_publish_pulse(signal)
+        and not storage.is_duplicate("PULSE", pulse_event_key)
+        and not storage.cooldown_active("PULSE", settings.pulse_cooldown)
+    ):
         try:
             pulse = await generate_pulse(
                 get_client(application),
@@ -348,7 +369,7 @@ async def automatic_market_check(application: Application):
             )
             state["last_pulse_at"] = now
             state["pulse_published"] += 1
-            get_storage(application).increment_stat("pulse_published")
+            storage.mark_published("PULSE", pulse_event_key)
             logger.info("Automatic PULSE published")
         except Exception:
             # Ошибка PULSE не должна блокировать последующие NEWS/MARKET проверки.
@@ -360,11 +381,11 @@ async def automatic_news_check(application: Application):
     state = get_state(application)
     now = asyncio.get_running_loop().time()
 
-    if now - state["last_news_at"] < settings.news_cooldown:
+    storage = application.bot_data["storage"]
+    if storage.cooldown_active("NEWS", settings.news_cooldown):
         return
 
     state["news_checks"] += 1
-    get_storage(application).increment_stat("news_checks")
     try:
         news = await fetch_important_news(
             get_client(application),
@@ -376,7 +397,8 @@ async def automatic_news_check(application: Application):
 
         if news.importance < 9 or news.key.upper() == "NONE":
             return
-        if news.key == state["last_news_key"] or news.fingerprint == state["last_news_hash"]:
+        news_event_key = str(news.fingerprint or news.key or "").strip()
+        if not news_event_key or storage.is_duplicate("NEWS", news_event_key):
             logger.info("Automatic NEWS skipped as duplicate")
             return
 
@@ -386,7 +408,7 @@ async def automatic_news_check(application: Application):
         state["last_news_key"] = news.key
         state["last_news_hash"] = news.fingerprint
         state["news_published"] += 1
-        get_storage(application).increment_stat("news_published")
+        storage.mark_published("NEWS", news_event_key)
         logger.info("Automatic NEWS published")
     except Exception:
         state["last_news_at"] = now
@@ -439,15 +461,15 @@ async def send_startup_notification(application: Application):
     text = (
         "<b>TRD PULSE</b>\n\n"
         "<blockquote>"
-        "<b>SYSTEM ONLINE</b><br><br>"
-        "<b>Статус:</b> работает<br>"
-        f"<b>Администраторов:</b> {len(settings.admin_user_ids)}<br>"
-        f"<b>MARKET:</b> каждые {settings.market_check_interval // 60} мин<br>"
-        f"<b>NEWS:</b> каждые {settings.news_check_interval // 60} мин<br>"
-        f"<b>Проверок MARKET:</b> {state['market_checks']}<br>"
-        f"<b>Проверок NEWS:</b> {state['news_checks']}<br>"
-        f"<b>Публикаций MARKET:</b> {state['market_published']}<br>"
-        f"<b>Публикаций PULSE:</b> {state['pulse_published']}<br>"
+        "<b>SYSTEM ONLINE</b>\n\n"
+        "<b>Статус:</b> работает\n"
+        f"<b>Администраторов:</b> {len(settings.admin_user_ids)}\n"
+        f"<b>MARKET:</b> каждые {settings.market_check_interval // 60} мин\n"
+        f"<b>NEWS:</b> каждые {settings.news_check_interval // 60} мин\n"
+        f"<b>Проверок MARKET:</b> {state['market_checks']}\n"
+        f"<b>Проверок NEWS:</b> {state['news_checks']}\n"
+        f"<b>Публикаций MARKET:</b> {state['market_published']}\n"
+        f"<b>Публикаций PULSE:</b> {state['pulse_published']}\n"
         f"<b>Публикаций NEWS:</b> {state['news_published']}"
         "</blockquote>"
     )
@@ -470,8 +492,8 @@ async def post_init(application: Application):
     settings = load_settings()
     application.bot_data["settings"] = settings
     application.bot_data["market_engine"] = MarketEngine(settings.coingecko_api)
-    application.bot_data["storage"] = SQLiteStorage("trd_pulse.db")
     application.bot_data["http_client"] = httpx.AsyncClient(timeout=httpx.Timeout(30.0))
+    application.bot_data["storage"] = SQLiteStorage()
     get_state(application)
     await configure_commands(application)
     await preflight_checks(application, settings)
@@ -492,6 +514,10 @@ async def post_shutdown(application: Application):
     client = application.bot_data.get("http_client")
     if client:
         await client.aclose()
+
+    storage = application.bot_data.get("storage")
+    if storage:
+        storage.close()
 
     logger.info("TRD Pulse stopped")
 
@@ -519,7 +545,7 @@ async def preflight_checks(application: Application, settings: Settings):
             json={
                 "model": settings.openai_model,
                 "input": "Reply with exactly: OK",
-                "max_output_tokens": 8,
+                "max_output_tokens": 16,
             },
         )
         if response.status_code >= 400:
