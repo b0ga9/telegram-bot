@@ -5,7 +5,7 @@ import logging
 from datetime import datetime, timezone
 
 import httpx
-from telegram import Update, ReplyKeyboardMarkup, KeyboardButton
+from telegram import Update, ReplyKeyboardMarkup, KeyboardButton, BotCommand
 from telegram.constants import ParseMode
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
 
@@ -25,7 +25,7 @@ logger = logging.getLogger("trd-pulse")
 
 
 def is_admin(update: Update, settings: Settings) -> bool:
-    return bool(update.effective_user and update.effective_user.id == settings.admin_user_id)
+    return bool(update.effective_user and update.effective_user.id in settings.admin_user_ids)
 
 
 async def admin_only(update: Update, settings: Settings) -> bool:
@@ -84,8 +84,14 @@ async def send_post(bot, chat_id, text: str, image_path=None, reply_markup=None)
 
 
 def format_market_post(market: dict, signal: MarketSignal) -> str:
-    # MARKET is visual-first: the card itself is the post.
-    return ""
+    # MARKET is visual-first. Keep a compact caption so the command also works
+    # when visual cards are disabled.
+    return (
+        f"<b>TRD / MARKET</b>\n"
+        f"<b>{signal.regime.replace('_', ' ')}</b> · score {signal.score}\n"
+        f"BTC {market.get('btc', {}).get('current_price', '—')} · "
+        f"ETH {market.get('eth', {}).get('current_price', '—')}"
+    )
 
 
 async def collect_market(application: Application):
@@ -117,13 +123,19 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await admin_only(update, settings):
         return
 
+    state = get_state(context.application)
+    started = state["monitor_started_at"].strftime("%Y-%m-%d %H:%M UTC")
     await update.effective_message.reply_text(
-        "<b>TRD PULSE / CONTROL</b>\n\n"
-        "<blockquote>Управление системой и ручной запуск модулей.<br><br>"
-        "<b>MARKET</b> — данные в визуальных карточках<br>"
-        "<b>PULSE</b> — краткий рыночный контекст<br>"
-        "<b>NEWS</b> — только важные события<br>"
-        "<b>STATUS</b> — состояние системы</blockquote>",
+        "<b>TRD PULSE</b>\n\n"
+        "<blockquote>"
+        "<b>ПАНЕЛЬ УПРАВЛЕНИЯ</b><br><br>"
+        "<b>MARKET</b> — текущее состояние рынка<br>"
+        "<b>PULSE</b> — последний рыночный сигнал<br>"
+        "<b>NEWS</b> — важное событие<br>"
+        "<b>STATUS</b> — состояние системы<br><br>"
+        f"<b>Мониторинг:</b> активен<br>"
+        f"<b>Запуск:</b> {started}"
+        "</blockquote>",
         parse_mode=ParseMode.HTML,
         reply_markup=main_menu(),
     )
@@ -233,11 +245,14 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     state = get_state(context.application)
     started = state["monitor_started_at"].strftime("%Y-%m-%d %H:%M UTC")
+    admins = ", ".join(str(user_id) for user_id in settings.admin_user_ids)
     await update.effective_message.reply_text(
         "<b>TRD / SYSTEM STATUS</b>\n\n"
         "<blockquote>"
-        f"<b>Монитор:</b> работает<br>"
+        f"<b>Система:</b> работает<br>"
         f"<b>Запуск:</b> {started}<br>"
+        f"<b>Администраторы:</b> {len(settings.admin_user_ids)}<br>"
+        f"<b>IDs:</b> {admins}<br><br>"
         f"<b>MARKET:</b> каждые {settings.market_check_interval // 60} мин<br>"
         f"<b>NEWS:</b> каждые {settings.news_check_interval // 60} мин<br>"
         f"<b>Последняя NEWS:</b> {'есть' if state['last_news_text'] else 'нет'}"
@@ -343,14 +358,55 @@ async def monitor_loop(application: Application):
         await asyncio.sleep(15)
 
 
+async def configure_commands(application: Application):
+    await application.bot.set_my_commands([
+        BotCommand("start", "Панель управления"),
+        BotCommand("market", "Состояние рынка"),
+        BotCommand("pulse", "Рыночный сигнал"),
+        BotCommand("news", "Важные новости"),
+        BotCommand("status", "Состояние системы"),
+    ])
+
+
+async def send_startup_notification(application: Application):
+    settings = get_settings(application)
+    state = get_state(application)
+
+    # A bot can message only users who have already opened/started it.
+    text = (
+        "<b>TRD PULSE</b>\n\n"
+        "<blockquote>"
+        "<b>SYSTEM ONLINE</b><br><br>"
+        "<b>Статус:</b> работает<br>"
+        f"<b>Администраторов:</b> {len(settings.admin_user_ids)}<br>"
+        f"<b>MARKET:</b> каждые {settings.market_check_interval // 60} мин<br>"
+        f"<b>NEWS:</b> каждые {settings.news_check_interval // 60} мин"
+        "</blockquote>"
+    )
+
+    for user_id in settings.admin_user_ids:
+        try:
+            await application.bot.send_message(
+                chat_id=user_id,
+                text=text,
+                parse_mode=ParseMode.HTML,
+                disable_web_page_preview=True,
+                reply_markup=main_menu(),
+            )
+        except Exception:
+            logger.exception("Startup notification failed for admin %s", user_id)
+
+
 async def post_init(application: Application):
     settings = load_settings()
     application.bot_data["settings"] = settings
     application.bot_data["market_engine"] = MarketEngine(settings.coingecko_api)
     application.bot_data["http_client"] = httpx.AsyncClient(timeout=httpx.Timeout(30.0))
     get_state(application)
+    await configure_commands(application)
     application.bot_data["monitor_task"] = asyncio.create_task(monitor_loop(application))
     logger.info("TRD Pulse initialized")
+    await send_startup_notification(application)
 
 
 async def post_shutdown(application: Application):

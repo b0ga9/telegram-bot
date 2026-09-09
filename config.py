@@ -9,7 +9,7 @@ from pathlib import Path
 class Settings:
     telegram_bot_token: str
     telegram_channel_id: str
-    admin_user_id: int
+    admin_user_ids: tuple[int, ...]
 
     openai_api_key: str
     openai_model: str
@@ -38,11 +38,32 @@ def _required(name: str) -> str:
     return value
 
 
+def _admin_ids() -> tuple[int, ...]:
+    raw = (os.getenv("ADMIN_USER_IDS") or "").strip()
+    if not raw:
+        # Backward compatibility with the old single-admin secret.
+        raw = _required("ADMIN_USER_ID")
+
+    ids: list[int] = []
+    for value in raw.split(","):
+        value = value.strip()
+        if not value:
+            continue
+        try:
+            ids.append(int(value))
+        except ValueError as exc:
+            raise RuntimeError(f"Некорректный Telegram ID администратора: {value}") from exc
+
+    if not ids:
+        raise RuntimeError("Не задан ни один администратор: ADMIN_USER_IDS / ADMIN_USER_ID")
+    return tuple(dict.fromkeys(ids))
+
+
 def load_settings() -> Settings:
     return Settings(
         telegram_bot_token=_required("TELEGRAM_BOT_TOKEN"),
         telegram_channel_id=_required("TELEGRAM_CHANNEL_ID"),
-        admin_user_id=int(_required("ADMIN_USER_ID")),
+        admin_user_ids=_admin_ids(),
         openai_api_key=_required("OPENAI_API_KEY"),
         openai_model=(os.getenv("OPENAI_MODEL") or "gpt-5.6-luna").strip(),
         visual_enabled=_bool("TRD_VISUAL_ENABLED"),
