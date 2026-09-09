@@ -501,7 +501,7 @@ async def preflight_checks(application: Application, settings: Settings):
             json={
                 "model": settings.openai_model,
                 "input": "Reply with exactly: OK",
-                "max_output_tokens": 8,
+                "max_output_tokens": 16,
             },
         )
         if response.status_code >= 400:
