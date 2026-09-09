@@ -3,25 +3,65 @@ name: Run TRD Pulse
 on:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   run:
     runs-on: ubuntu-latest
     timeout-minutes: 350
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
+      - name: Setup Python
+        uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+          cache: "pip"
 
-      - run: pip install -r requirements.txt
+      - name: Install dependencies
+        run: python -m pip install --upgrade pip && pip install -r requirements.txt
+
+      - name: Validate required secrets
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHANNEL_ID: ${{ secrets.TELEGRAM_CHANNEL_ID }}
+          ADMIN_USER_IDS: ${{ secrets.ADMIN_USER_IDS }}
+          ADMIN_USER_ID: ${{ secrets.ADMIN_USER_ID }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENAI_MODEL: ${{ secrets.OPENAI_MODEL }}
+        run: |
+          python - <<'PY'
+          import os
+          required = ["TELEGRAM_BOT_TOKEN", "TELEGRAM_CHANNEL_ID", "OPENAI_API_KEY"]
+          missing = [name for name in required if not os.getenv(name, "").strip()]
+          admin_ok = bool(os.getenv("ADMIN_USER_IDS", "").strip() or os.getenv("ADMIN_USER_ID", "").strip())
+          if not admin_ok:
+              missing.append("ADMIN_USER_IDS (or ADMIN_USER_ID)")
+          if missing:
+              raise SystemExit("Missing GitHub Secrets: " + ", ".join(missing))
+          print("Required secrets are present (values hidden).")
+          print("OPENAI_MODEL:", os.getenv("OPENAI_MODEL", "").strip() or "gpt-5.6-luna (default)")
+          PY
+
+      - name: Syntax check
+        run: python -m py_compile bot.py config.py
 
       - name: Run bot
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHANNEL_ID: ${{ secrets.TELEGRAM_CHANNEL_ID }}
+          ADMIN_USER_IDS: ${{ secrets.ADMIN_USER_IDS }}
           ADMIN_USER_ID: ${{ secrets.ADMIN_USER_ID }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           OPENAI_MODEL: ${{ secrets.OPENAI_MODEL }}
+          TRD_VISUAL_ENABLED: "true"
+          TRD_VISUAL_DIR: "/tmp/trd_visuals"
+          MARKET_CHECK_INTERVAL: "600"
+          NEWS_CHECK_INTERVAL: "3600"
+          MARKET_COOLDOWN: "7200"
+          PULSE_COOLDOWN: "3600"
+          NEWS_COOLDOWN: "2700"
         run: python bot.py
