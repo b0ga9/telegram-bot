@@ -57,22 +57,69 @@ NEWS_PROMPT = """
 Проверь событие минимум по 2 независимым источникам.
 Не выдумывай факты и URL.
 
-Верни ТОЛЬКО JSON:
-{
-  "importance": 0,
-  "key": "короткий стабильный идентификатор события или NONE",
-  "title": "очень короткий заголовок",
-  "summary": "1-2 коротких предложения",
-  "why_it_matters": "1 короткое предложение",
-  "sources": ["https://...", "https://..."]
-}
-
 importance: 0-10.
 Если важного события нет, верни importance 0, key NONE и пустые поля.
 """
 
 
-async def fetch_important_news(client: httpx.AsyncClient, *, api_url: str, api_key: str, model: str) -> NewsResult:
+NEWS_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "importance": {"type": "integer"},
+        "key": {"type": "string"},
+        "title": {"type": "string"},
+        "summary": {"type": "string"},
+        "why_it_matters": {"type": "string"},
+        "sources": {
+            "type": "array",
+            "items": {"type": "string"},
+        },
+    },
+    "required": [
+        "importance",
+        "key",
+        "title",
+        "summary",
+        "why_it_matters",
+        "sources",
+    ],
+    "additionalProperties": False,
+}
+
+
+def _structured_format(name: str, schema: dict) -> dict:
+    return {
+        "type": "json_schema",
+        "name": name,
+        "strict": True,
+        "schema": schema,
+    }
+
+
+def _extract_output_text(data: dict) -> str:
+    chunks: list[str] = []
+    for item in data.get("output", []):
+        if item.get("type") == "message":
+            for content in item.get("content", []):
+                if content.get("type") == "output_text":
+                    chunks.append(content.get("text", ""))
+                elif content.get("type") == "refusal":
+                    raise RuntimeError(f"OpenAI refusal: {content.get('refusal', 'unknown')}")
+    raw = "".join(chunks).strip()
+    if not raw:
+        status = data.get("status", "unknown")
+        details = data.get("incomplete_details") or data.get("error") or {}
+        raise RuntimeError(f"OpenAI returned no structured output (status={status}, details={details})")
+    return raw
+
+
+async def fetch_important_news(
+    client: httpx.AsyncClient,
+    *,
+    api_url: str,
+    api_key: str,
+    model: str,
+) -> NewsResult:
     response = await client.post(
         api_url,
         headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
@@ -80,32 +127,23 @@ async def fetch_important_news(client: httpx.AsyncClient, *, api_url: str, api_k
             "model": model,
             "input": NEWS_PROMPT,
             "tools": [{"type": "web_search"}],
+            "text": {"format": _structured_format("trd_pulse_news", NEWS_SCHEMA)},
             "max_output_tokens": 900,
+            "store": False,
         },
     )
     response.raise_for_status()
     data = response.json()
+    parsed = json.loads(_extract_output_text(data))
 
-    chunks = []
-    for item in data.get("output", []):
-        if item.get("type") == "message":
-            for content in item.get("content", []):
-                if content.get("type") in {"output_text", "text"}:
-                    chunks.append(content.get("text", ""))
-
-    raw = "".join(chunks).strip()
-    if raw.startswith("```"):
-        raw = raw.strip("`").removeprefix("json").strip()
-
-    parsed = json.loads(raw)
-    sources = [str(url) for url in parsed.get("sources", []) if str(url).startswith("http")][:3]
+    sources = [str(url) for url in parsed["sources"] if str(url).startswith("http")][:3]
 
     return NewsResult(
-        importance=max(0, min(10, int(parsed.get("importance", 0)))),
-        key=str(parsed.get("key", "NONE")).strip() or "NONE",
-        title=str(parsed.get("title", "")).strip(),
-        summary=str(parsed.get("summary", "")).strip(),
-        why_it_matters=str(parsed.get("why_it_matters", "")).strip(),
+        importance=max(0, min(10, int(parsed["importance"]))),
+        key=str(parsed["key"]).strip() or "NONE",
+        title=str(parsed["title"]).strip(),
+        summary=str(parsed["summary"]).strip(),
+        why_it_matters=str(parsed["why_it_matters"]).strip(),
         sources=sources,
     )
 
