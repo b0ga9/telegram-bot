@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import hashlib
+import json
+import time
 import re
 from datetime import datetime, timezone
 from html import escape
@@ -17,6 +20,7 @@ from market_engine import MarketEngine, MarketSignal, should_publish_market, sho
 from news_engine import NewsResult, fetch_important_news, format_news_post
 from pulse_engine import format_pulse_post, generate_pulse
 from visual_engine import build_market_card
+from storage import SQLiteStorage
 
 
 logging.basicConfig(
@@ -24,6 +28,21 @@ logging.basicConfig(
     level=logging.INFO,
 )
 logger = logging.getLogger("trd-pulse")
+
+
+def event_key_for_signal(kind: str, signal: MarketSignal) -> str:
+    """Stable short-window key for deduplicating repeated market signals."""
+    breadth = getattr(signal, "breadth", {}) or {}
+    payload = {
+        "kind": kind,
+        "bucket": int(time.time() // 3600),
+        "regime": str(getattr(signal, "regime", "")),
+        "score": getattr(signal, "score", None),
+        "positive_pct": breadth.get("positive_pct"),
+        "negative_pct": breadth.get("negative_pct"),
+    }
+    raw = json.dumps(payload, sort_keys=True, ensure_ascii=False, default=str)
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
 def is_admin(update: Update, settings: Settings) -> bool:
@@ -306,7 +325,13 @@ async def automatic_market_check(application: Application):
     market, _, signal = await collect_market(application)
     now = asyncio.get_running_loop().time()
 
-    if should_publish_market(signal) and now - state["last_market_at"] >= settings.market_cooldown:
+    market_event_key = event_key_for_signal("MARKET", signal)
+    storage = application.bot_data["storage"]
+    if (
+        should_publish_market(signal)
+        and not storage.is_duplicate("MARKET", market_event_key)
+        and not storage.cooldown_active("MARKET", settings.market_cooldown)
+    ):
         image_path = None
         if settings.visual_enabled:
             image_path = build_market_card(market, signal, settings.visual_dir)
@@ -318,9 +343,15 @@ async def automatic_market_check(application: Application):
         )
         state["last_market_at"] = now
         state["market_published"] += 1
+        storage.mark_published("MARKET", market_event_key)
         logger.info("Automatic MARKET published")
 
-    if should_publish_pulse(signal) and now - state["last_pulse_at"] >= settings.pulse_cooldown:
+    pulse_event_key = event_key_for_signal("PULSE", signal)
+    if (
+        should_publish_pulse(signal)
+        and not storage.is_duplicate("PULSE", pulse_event_key)
+        and not storage.cooldown_active("PULSE", settings.pulse_cooldown)
+    ):
         try:
             pulse = await generate_pulse(
                 get_client(application),
@@ -338,6 +369,7 @@ async def automatic_market_check(application: Application):
             )
             state["last_pulse_at"] = now
             state["pulse_published"] += 1
+            storage.mark_published("PULSE", pulse_event_key)
             logger.info("Automatic PULSE published")
         except Exception:
             # Ошибка PULSE не должна блокировать последующие NEWS/MARKET проверки.
@@ -349,7 +381,8 @@ async def automatic_news_check(application: Application):
     state = get_state(application)
     now = asyncio.get_running_loop().time()
 
-    if now - state["last_news_at"] < settings.news_cooldown:
+    storage = application.bot_data["storage"]
+    if storage.cooldown_active("NEWS", settings.news_cooldown):
         return
 
     state["news_checks"] += 1
@@ -364,7 +397,8 @@ async def automatic_news_check(application: Application):
 
         if news.importance < 9 or news.key.upper() == "NONE":
             return
-        if news.key == state["last_news_key"] or news.fingerprint == state["last_news_hash"]:
+        news_event_key = str(news.fingerprint or news.key or "").strip()
+        if not news_event_key or storage.is_duplicate("NEWS", news_event_key):
             logger.info("Automatic NEWS skipped as duplicate")
             return
 
@@ -374,6 +408,7 @@ async def automatic_news_check(application: Application):
         state["last_news_key"] = news.key
         state["last_news_hash"] = news.fingerprint
         state["news_published"] += 1
+        storage.mark_published("NEWS", news_event_key)
         logger.info("Automatic NEWS published")
     except Exception:
         state["last_news_at"] = now
@@ -458,6 +493,7 @@ async def post_init(application: Application):
     application.bot_data["settings"] = settings
     application.bot_data["market_engine"] = MarketEngine(settings.coingecko_api)
     application.bot_data["http_client"] = httpx.AsyncClient(timeout=httpx.Timeout(30.0))
+    application.bot_data["storage"] = SQLiteStorage()
     get_state(application)
     await configure_commands(application)
     await preflight_checks(application, settings)
@@ -478,6 +514,10 @@ async def post_shutdown(application: Application):
     client = application.bot_data.get("http_client")
     if client:
         await client.aclose()
+
+    storage = application.bot_data.get("storage")
+    if storage:
+        storage.close()
 
     logger.info("TRD Pulse stopped")
 
