@@ -1,0 +1,124 @@
+name: OpenAI Structured Outputs Test
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  structured-test:
+    runs-on: ubuntu-latest
+    env:
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      OPENAI_MODEL: ${{ secrets.OPENAI_MODEL }}
+    steps:
+      - name: Test Structured Outputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json
+          import os
+          import sys
+          import urllib.error
+          import urllib.request
+
+          api_key = os.environ.get("OPENAI_API_KEY", "").strip()
+          model = os.environ.get("OPENAI_MODEL", "").strip() or "gpt-5.6-luna"
+
+          if not api_key:
+              print("ERROR: OPENAI_API_KEY is not configured in GitHub Secrets.")
+              sys.exit(1)
+
+          payload = {
+              "model": model,
+              "store": False,
+              "input": "Return a short test object. The result must follow the supplied schema.",
+              "text": {
+                  "format": {
+                      "type": "json_schema",
+                      "name": "trd_pulse_test",
+                      "strict": True,
+                      "schema": {
+                          "type": "object",
+                          "properties": {
+                              "status": {"type": "string", "enum": ["ok"]},
+                              "value": {"type": "integer"},
+                          },
+                          "required": ["status", "value"],
+                          "additionalProperties": False,
+                      },
+                  }
+              },
+              "max_output_tokens": 100,
+          }
+
+          request = urllib.request.Request(
+              "https://api.openai.com/v1/responses",
+              data=json.dumps(payload).encode("utf-8"),
+              headers={
+                  "Authorization": f"Bearer {api_key}",
+                  "Content-Type": "application/json",
+              },
+              method="POST",
+          )
+
+          try:
+              with urllib.request.urlopen(request, timeout=60) as response:
+                  status_code = response.status
+                  body = response.read().decode("utf-8")
+          except urllib.error.HTTPError as exc:
+              body = exc.read().decode("utf-8", errors="replace")
+              print(f"OpenAI HTTP status: {exc.code}")
+              try:
+                  error_json = json.loads(body)
+                  print(json.dumps(error_json, ensure_ascii=False, indent=2))
+              except json.JSONDecodeError:
+                  print(body[:4000])
+              sys.exit(1)
+          except urllib.error.URLError as exc:
+              print(f"OpenAI connection error: {exc.reason}")
+              sys.exit(1)
+
+          print(f"OpenAI HTTP status: {status_code}")
+          data = json.loads(body)
+
+          output_text = data.get("output_text")
+          if not output_text:
+              for item in data.get("output", []):
+                  if item.get("type") != "message":
+                      continue
+                  for content in item.get("content", []):
+                      if content.get("type") == "output_text" and content.get("text"):
+                          output_text = content["text"]
+                          break
+                  if output_text:
+                      break
+
+          if not output_text:
+              print("ERROR: No output_text returned.")
+              print(json.dumps(data, ensure_ascii=False, indent=2)[:6000])
+              sys.exit(1)
+
+          print("Model output:")
+          print(output_text)
+
+          try:
+              result = json.loads(output_text)
+          except json.JSONDecodeError as exc:
+              print(f"ERROR: Output is not valid JSON: {exc}")
+              sys.exit(1)
+
+          if set(result) != {"status", "value"}:
+              print(f"ERROR: Unexpected keys: {sorted(result)}")
+              sys.exit(1)
+          if result.get("status") != "ok":
+              print(f"ERROR: Unexpected status: {result.get('status')!r}")
+              sys.exit(1)
+          if not isinstance(result.get("value"), int) or isinstance(result.get("value"), bool):
+              print(f"ERROR: value is not an integer: {result.get('value')!r}")
+              sys.exit(1)
+
+          print(f"PASS: Structured Outputs schema accepted by model '{model}'.")
+          PY
